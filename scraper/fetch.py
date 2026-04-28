@@ -379,23 +379,35 @@ class ParcelIndex:
             for info in zf.infolist():
                 log.info(f"  {info.filename}  ({info.file_size:,} bytes)")
 
-            # Priority: .txt → .csv → .dbf
-            for ext in (".txt", ".csv", ".dbf"):
-                for name in zf.namelist():
-                    if Path(name).suffix.lower() == ext:
-                        rows = self._auto_parse(zf.read(name), name)
-                        if rows:
-                            log.info(f"[CAD] sample keys: {list(rows[0].keys())[:16]}")
-                            break
-                if rows:
-                    break
+            names = zf.namelist()
 
-            # If no match by extension, try every file
-            if not rows:
-                for name in zf.namelist():
+            # ── Priority 1: AGENT_OWNER file (has owner + address) ─────────
+            owner_files = [n for n in names
+                           if "AGENT_OWNER" in n.upper() or "OWNER_AGENT" in n.upper()
+                           if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
+                           if zf.getinfo(n).file_size > 1_000_000]  # must be substantive
+            # ── Priority 2: APPRAISAL_INFO (also has owner fields) ──────────
+            info_files  = [n for n in names
+                           if "APPRAISAL_INFO" in n.upper()
+                           if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
+                           if zf.getinfo(n).file_size > 1_000_000]
+            # ── Priority 3: any large TXT/CSV/DBF ───────────────────────────
+            big_files   = sorted(
+                [n for n in names
+                 if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
+                 if zf.getinfo(n).file_size > 1_000_000],
+                key=lambda n: zf.getinfo(n).file_size, reverse=True
+            )
+
+            for candidate_list in (owner_files, info_files, big_files):
+                for name in candidate_list:
+                    log.info(f"[CAD] trying: {name} ({zf.getinfo(name).file_size:,} bytes)")
                     rows = self._auto_parse(zf.read(name), name)
                     if rows:
+                        log.info(f"[CAD] sample keys: {list(rows[0].keys())[:16]}")
                         break
+                if rows:
+                    break
 
         except zipfile.BadZipFile:
             log.warning("[CAD] not a ZIP – trying raw parse")
@@ -575,101 +587,293 @@ class ClerkScraper:
         except Exception as exc:
             log.warning(f"[Clerk] broad search error: {exc}")
 
-    async def _fill_form(self, page, doc_type: str | None, date_from: str, date_to: str):
-        await asyncio.sleep(0.5)
+    async def _fill_form(self, page, doc_type, date_from, date_to):
+        """
+        Fill AVA search form.
+        AVA is a React MUI SPA. After clicking a tab the inputs render
+        asynchronously - we must wait for them to appear before filling.
+        Strategy:
+          1. Wait up to 8 s for at least one input to become visible
+          2. Log all input attributes for CI debugging
+          3. Try get_by_label() (works for MUI floating-label inputs)
+          4. Try attribute selectors (id / placeholder / aria-label)
+          5. Positional fallback: fill the N-th visible input by DOM order
+          6. JS nativeInputValueSetter as last resort for React-controlled inputs
+        """
+        # Wait for inputs to render after tab click
+        for wait_sel in ('input[type="text"]', 'input', 'textarea'):
+            try:
+                await page.wait_for_selector(wait_sel, state="visible", timeout=8_000)
+                break
+            except Exception:
+                pass
+        await asyncio.sleep(0.8)
 
+        # ── Log every input in the DOM so we can see real attribute names ──────
+        await self._log_inputs(page)
+
+        # ── Get ordered list of all visible text inputs ───────────────────────
+        visible = await self._visible_text_inputs(page)
+        log.info(f"[Clerk] {len(visible)} visible text inputs found")
+
+        # ── Doc type ──────────────────────────────────────────────────────────
         if doc_type:
+            filled = False
+            # MUI label-based (most reliable for React apps)
+            for lbl in ("Document Type", "Doc Type", "Instrument Type", "Type"):
+                try:
+                    el = page.get_by_label(re.compile(lbl, re.I)).first
+                    if await el.is_visible(timeout=2000):
+                        await self._fill_input(el, doc_type)
+                        log.info(f"[Clerk] doc_type via label {lbl!r}: {doc_type}")
+                        filled = True
+                        break
+                except Exception:
+                    pass
+            if not filled:
+                for sel in [
+                    'input[placeholder*="Doc"]', 'input[placeholder*="doc"]',
+                    'input[placeholder*="Type"]', 'input[placeholder*="Instrument"]',
+                    'input[id*="docType"]', 'input[id*="DocType"]',
+                    'input[id*="doc"]', 'input[id*="type"]',
+                    'input[name*="type"]', 'input[aria-label*="Type"]',
+                    'input[aria-label*="Document"]', 'input[aria-label*="Instrument"]',
+                ]:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=1500):
+                            await self._fill_input(el, doc_type)
+                            log.info(f"[Clerk] doc_type via {sel!r}: {doc_type}")
+                            filled = True
+                            break
+                    except Exception:
+                        pass
+            if not filled and visible:
+                try:
+                    await self._fill_input(visible[0], doc_type)
+                    log.info(f"[Clerk] doc_type via pos[0] fallback: {doc_type}")
+                except Exception:
+                    pass
+
+        # ── Date-from ─────────────────────────────────────────────────────────
+        filled_from = False
+        # MUI label approach first
+        for lbl in ("Recorded Date From", "Begin Date", "Start Date",
+                    "Date From", "From Date", "Filing Date From", "From"):
+            try:
+                el = page.get_by_label(re.compile(lbl, re.I)).first
+                if await el.is_visible(timeout=2000):
+                    await self._fill_input(el, date_from)
+                    log.info(f"[Clerk] date_from via label {lbl!r}: {date_from}")
+                    filled_from = True
+                    break
+            except Exception:
+                pass
+        if not filled_from:
             for sel in [
-                'input[placeholder*="Doc"]', 'input[placeholder*="Type"]',
-                'input[placeholder*="Instrument"]',
-                'input[id*="docType"]', 'input[id*="type"]',
-                'input[name*="type"]', 'input[id*="instrument"]',
-                'input[aria-label*="Type"]',
+                'input[placeholder*="From"]', 'input[placeholder*="from"]',
+                'input[placeholder*="Start"]', 'input[placeholder*="Begin"]',
+                'input[id*="dateFrom"]', 'input[id*="DateFrom"]',
+                'input[id*="beginDate"]', 'input[id*="startDate"]',
+                'input[id*="RecordedDateFrom"]', 'input[id*="FiledDateFrom"]',
+                'input[name*="from"]', 'input[name*="begin"]',
+                'input[aria-label*="From"]', 'input[aria-label*="Start"]',
             ]:
                 try:
                     el = page.locator(sel).first
-                    if await el.is_visible(timeout=2000):
-                        await el.triple_click()
-                        await el.fill(doc_type)
-                        await asyncio.sleep(0.3)
-                        await el.press("Enter")
-                        await asyncio.sleep(0.4)
-                        # Accept autocomplete dropdown
-                        drop = page.locator(
-                            "li[role='option'], .dropdown-item, .autocomplete-item"
-                        ).first
-                        if await drop.is_visible(timeout=1200):
-                            await drop.click()
-                            await asyncio.sleep(0.3)
-                        log.info(f"[Clerk] doc type set: {doc_type}")
+                    if await el.is_visible(timeout=1500):
+                        await self._fill_input(el, date_from)
+                        log.info(f"[Clerk] date_from via {sel!r}: {date_from}")
+                        filled_from = True
                         break
                 except Exception:
                     pass
 
-        from_sels = [
-            'input[placeholder*="From Date"]', 'input[placeholder*="Start Date"]',
-            'input[placeholder*="Begin"]',
-            'input[id*="dateFrom"]', 'input[id*="beginDate"]', 'input[id*="startDate"]',
-            'input[name*="from"]', 'input[name*="begin"]',
-            'input[aria-label*="From"]', 'input[aria-label*="Start"]',
-        ]
-        for sel in from_sels:
+        # Positional fallback: second-to-last input is typically date-from
+        if not filled_from and len(visible) >= 2:
             try:
-                el = page.locator(sel).first
-                if await el.is_visible(timeout=2000):
-                    await el.triple_click()
-                    await el.fill(date_from)
-                    await el.press("Tab")
-                    log.info(f"[Clerk] date_from: {date_from}")
-                    break
+                await self._fill_input(visible[-2], date_from)
+                log.info(f"[Clerk] date_from via pos[-2] fallback: {date_from}")
+                filled_from = True
+            except Exception:
+                pass
+        elif not filled_from and len(visible) == 1:
+            try:
+                await self._fill_input(visible[0], date_from)
+                log.info(f"[Clerk] date_from via pos[0] fallback: {date_from}")
+                filled_from = True
+            except Exception:
+                pass
+        # JS React nativeInputValueSetter last resort
+        if not filled_from:
+            try:
+                await self._js_fill_nth_input(page, -2 if len(visible) >= 2 else 0,
+                                              date_from, "date_from")
+                filled_from = True
             except Exception:
                 pass
 
-        to_sels = [
-            'input[placeholder*="To Date"]', 'input[placeholder*="End Date"]',
-            'input[placeholder*="Thru"]',
-            'input[id*="dateTo"]', 'input[id*="endDate"]', 'input[id*="toDate"]',
-            'input[name*="to"]', 'input[name*="end"]',
-            'input[aria-label*="To"]', 'input[aria-label*="End"]',
-        ]
-        for sel in to_sels:
+        # ── Date-to ───────────────────────────────────────────────────────────
+        filled_to = False
+        for lbl in ("Recorded Date To", "End Date", "Date To", "To Date",
+                    "Filing Date To", "Thru Date", "To"):
             try:
-                el = page.locator(sel).first
+                el = page.get_by_label(re.compile(lbl, re.I)).first
                 if await el.is_visible(timeout=2000):
-                    await el.triple_click()
-                    await el.fill(date_to)
-                    await el.press("Tab")
-                    log.info(f"[Clerk] date_to: {date_to}")
+                    await self._fill_input(el, date_to)
+                    log.info(f"[Clerk] date_to via label {lbl!r}: {date_to}")
+                    filled_to = True
                     break
+            except Exception:
+                pass
+        if not filled_to:
+            for sel in [
+                'input[placeholder*="To"]', 'input[placeholder*="to"]',
+                'input[placeholder*="End"]', 'input[placeholder*="Thru"]',
+                'input[id*="dateTo"]', 'input[id*="DateTo"]',
+                'input[id*="endDate"]', 'input[id*="toDate"]',
+                'input[id*="RecordedDateTo"]', 'input[id*="FiledDateTo"]',
+                'input[name*="to"]', 'input[name*="end"]',
+                'input[aria-label*="To"]', 'input[aria-label*="End"]',
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=1500):
+                        await self._fill_input(el, date_to)
+                        log.info(f"[Clerk] date_to via {sel!r}: {date_to}")
+                        filled_to = True
+                        break
+                except Exception:
+                    pass
+
+        # Positional fallback: last visible input is typically date-to
+        if not filled_to and visible:
+            try:
+                await self._fill_input(visible[-1], date_to)
+                log.info(f"[Clerk] date_to via pos[-1] fallback: {date_to}")
+                filled_to = True
+            except Exception:
+                pass
+        if not filled_to:
+            try:
+                await self._js_fill_nth_input(page, -1, date_to, "date_to")
+                filled_to = True
             except Exception:
                 pass
 
         await self._ss(page, f"04_form_{doc_type or 'broad'}")
 
-        # Submit
+        # ── Submit ────────────────────────────────────────────────────────────
         submitted = False
-        for label in ("Search", "Submit", "Find Records", "Go", "Run Search"):
+        for label in ("Search", "Submit", "Find Records", "Go", "Run Search", "Find"):
             try:
                 btn = page.get_by_role("button", name=re.compile(f"^{label}$", re.I))
                 if await btn.count():
                     await btn.first.click()
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(5)
                     submitted = True
-                    log.info(f"[Clerk] clicked: {label}")
+                    log.info(f"[Clerk] submitted via button: {label!r}")
                     break
             except Exception:
                 pass
         if not submitted:
             try:
                 await page.keyboard.press("Enter")
-                await asyncio.sleep(4)
+                await asyncio.sleep(5)
+                log.info("[Clerk] submitted via Enter key")
             except Exception:
                 pass
 
         try:
-            await page.wait_for_load_state("networkidle", timeout=20_000)
+            await page.wait_for_load_state("networkidle", timeout=25_000)
         except Exception:
-            await asyncio.sleep(3)
+            await asyncio.sleep(4)
+
+        await self._ss(page, f"05_results_{doc_type or 'broad'}")
+
+    async def _visible_text_inputs(self, page):
+        """Return ordered list of visible text/date input locators."""
+        inputs = []
+        seen_bboxes = set()
+        for sel in [
+            'input[type="text"]', 'input[type="date"]',
+            'input:not([type])', 'input[type="search"]',
+            'input[type=""]',
+        ]:
+            try:
+                els = page.locator(sel)
+                n = await els.count()
+                for i in range(n):
+                    el = els.nth(i)
+                    try:
+                        if await el.is_visible(timeout=500):
+                            bb = await el.bounding_box()
+                            key = (round(bb["x"]), round(bb["y"])) if bb else None
+                            if key and key not in seen_bboxes:
+                                seen_bboxes.add(key)
+                                inputs.append(el)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return inputs
+
+    async def _log_inputs(self, page):
+        """Dump all input elements to CI log for selector debugging."""
+        try:
+            info = await page.evaluate("""() =>
+                Array.from(document.querySelectorAll("input")).map(el => ({
+                    t: el.type,
+                    id: el.id,
+                    nm: el.name,
+                    ph: el.placeholder,
+                    al: el.getAttribute("aria-label"),
+                    cl: el.className.slice(0, 50),
+                    vis: el.offsetParent !== null,
+                }))
+            """)
+            log.info(f"[Clerk] DOM inputs ({len(info)}):")
+            for inp in info:
+                log.info(
+                    f"  type={inp['t']!r:8} id={inp['id']!r:30} "
+                    f"placeholder={inp['ph']!r:25} aria-label={inp['al']!r:25} "
+                    f"visible={inp['vis']}"
+                )
+        except Exception as exc:
+            log.warning(f"[Clerk] input enumeration failed: {exc}")
+
+    @staticmethod
+    async def _fill_input(el, value: str):
+        """Triple-click to select all, fill value, then Tab to trigger change events."""
+        await el.triple_click()
+        await el.fill(value)
+        await el.press("Tab")
+        await asyncio.sleep(0.25)
+
+    async def _js_fill_nth_input(self, page, idx: int, value: str, label: str):
+        """
+        Use JavaScript nativeInputValueSetter to force-fill a React-controlled input.
+        Works even when Playwright fill() doesn't trigger React's onChange.
+        idx: 0-based index, negative counts from end.
+        """
+        try:
+            result = await page.evaluate(f"""(val) => {{
+                const inputs = Array.from(document.querySelectorAll('input'))
+                    .filter(el => el.offsetParent !== null);
+                const idx = {idx};
+                const el = idx < 0 ? inputs[inputs.length + idx] : inputs[idx];
+                if (!el) return false;
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value').set;
+                nativeInputValueSetter.call(el, val);
+                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return el.value;
+            }}""", value)
+            if result:
+                log.info(f"[Clerk] {label} via JS nativeSetter: {value}")
+        except Exception as exc:
+            log.warning(f"[Clerk] JS fill failed for {label}: {exc}")
 
     async def _harvest(self, page, label: str = ""):
         p_num = 0
