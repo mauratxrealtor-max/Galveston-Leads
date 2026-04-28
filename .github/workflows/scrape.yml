@@ -53,7 +53,17 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
-      # ── 6. Commit updated records.json ────────────────────────────────────
+      # ── 6. Upload debug screenshots ──────────────────────────────────────
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ava-debug-screenshots
+          path: /tmp/ava_*.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # ── 7. Commit updated records.json ────────────────────────────────────
       - name: Commit updated records
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
