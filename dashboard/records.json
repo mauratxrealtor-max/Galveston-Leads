@@ -1,60 +1,11 @@
 {
-  "fetched_at": "2026-04-27T13:26:43.228148Z",
+  "fetched_at": "2026-04-28T02:29:11.430994Z",
   "source": "Galveston County Clerk (AVA) + GCAD Parcel Data",
   "date_range": {
-    "from": "2026-01-27",
-    "to": "2026-04-27"
+    "from": "2026-01-28",
+    "to": "2026-04-28"
   },
-  "total": 2,
+  "total": 0,
   "with_address": 0,
-  "records": [
-    {
-      "doc_num": "Number",
-      "doc_type": "",
-      "filed": "",
-      "cat": "NOFC",
-      "cat_label": "Notice of Foreclosure",
-      "owner": "",
-      "grantee": "",
-      "amount": null,
-      "legal": "",
-      "prop_address": "",
-      "prop_city": "",
-      "prop_state": "TX",
-      "prop_zip": "",
-      "mail_address": "",
-      "mail_city": "",
-      "mail_state": "TX",
-      "mail_zip": "",
-      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/search",
-      "score": 40,
-      "flags": [
-        "Pre-foreclosure"
-      ]
-    },
-    {
-      "doc_num": "Types",
-      "doc_type": "",
-      "filed": "",
-      "cat": "NOFC",
-      "cat_label": "Notice of Foreclosure",
-      "owner": "",
-      "grantee": "",
-      "amount": null,
-      "legal": "",
-      "prop_address": "",
-      "prop_city": "",
-      "prop_state": "TX",
-      "prop_zip": "",
-      "mail_address": "",
-      "mail_city": "",
-      "mail_state": "TX",
-      "mail_zip": "",
-      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/search",
-      "score": 40,
-      "flags": [
-        "Pre-foreclosure"
-      ]
-    }
-  ]
+  "records": []
 }
