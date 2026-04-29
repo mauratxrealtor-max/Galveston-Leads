@@ -284,18 +284,80 @@ class ParcelIndex:
         log.info(f"[CAD] DBF: {len(rows):,} rows from {name}")
         return rows
 
-    def _auto_parse(self, data: bytes, name: str) -> list[dict]:
+    def _parse_fixed_width(self, data: bytes, name: str,
+                           cols: list[tuple[str, int, int]]) -> list[dict]:
+        """
+        Parse a fixed-width text file given a column layout.
+        cols: list of (field_name, 0-based_start, length)
+        """
+        rows = []
+        try:
+            text = data.decode("latin-1", errors="replace")
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                row = {}
+                for fname, start, length in cols:
+                    row[fname] = line[start:start + length].strip()
+                rows.append(row)
+        except Exception as exc:
+            log.warning(f"[CAD] fixed-width parse error ({name}): {exc}")
+        log.info(f"[CAD] fixed-width: {len(rows):,} rows from {name}")
+        return rows
+
+    def _parse_header_txt(self, data: bytes, name: str) -> list[tuple[str, int, int]] | None:
+        """
+        Parse a GCAD *_HEADER.TXT file to extract column layout.
+        GCAD header files are pipe-delimited: FIELD_NAME|START_POS|LENGTH
+        (1-indexed positions). Returns list of (name, 0-based-start, length).
+        """
+        try:
+            text = data.decode("latin-1", errors="replace").strip()
+            cols = []
+            for line in text.splitlines():
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 3:
+                    fname = parts[0].upper()
+                    start = int(parts[1]) - 1   # convert 1-indexed → 0-indexed
+                    length = int(parts[2])
+                    cols.append((fname, start, length))
+            if cols:
+                log.info(f"[CAD] header parsed {len(cols)} columns from {name}")
+                return cols
+        except Exception as exc:
+            log.warning(f"[CAD] header parse error ({name}): {exc}")
+        return None
+
+    def _auto_parse(self, data: bytes, name: str,
+                    header_cols: list[tuple[str, int, int]] | None = None) -> list[dict]:
+        """Auto-detect format: use provided header layout, pipe-TXT, CSV, DBF, or fixed-width."""
         ext = Path(name).suffix.lower()
-        # Detect pipe-delimited by content, regardless of extension
-        if b"|" in data[:3000]:
+
+        # If caller supplied column layout, use fixed-width directly
+        if header_cols:
+            return self._parse_fixed_width(data, name, header_cols)
+
+        # Detect pipe-delimited by content
+        sample = data[:4000]
+        if b"|" in sample and sample.count(b"|") > 5:
             return self._parse_pipe_txt(data, name)
+
         if ext == ".csv":
-            return self._parse_csv(data, name)
+            rows = self._parse_csv(data, name)
+            if rows and len(list(rows[0].keys())) > 3:
+                return rows
+            # CSV with single giant key = fixed-width without delimiter
+            log.warning(f"[CAD] {name} looks fixed-width (CSV got {len(rows)} rows "
+                        f"with {len(rows[0].keys()) if rows else 0} cols) – need header")
+            return []
+
         if ext == ".dbf":
             return self._parse_dbf(data, name)
-        # Last resort: try CSV
-        rows = self._parse_csv(data, name)
-        return rows
+
+        # .txt with no pipes and no extension hint = fixed-width
+        # Return empty and let the load() method handle it with header
+        log.warning(f"[CAD] {name} appears fixed-width but no header supplied")
+        return []
 
     @staticmethod
     def _get(row: dict, *keys: str) -> str:
@@ -327,10 +389,10 @@ class ParcelIndex:
 
         mail_addr  = self._get(row, "MAIL_ADDR1",  "MAILADR1",   "ADDR_1",
                                     "MAIL_ADDRESS", "MAILING_ADDRESS", "MAIL_STR",
-                                    "MAIL_ADDR")
-        mail_city  = self._get(row, "MAIL_CITY",   "MAILCITY",   "CITY")
-        mail_state = self._get(row, "MAIL_STATE",  "MAILSTATE",  "STATE") or "TX"
-        mail_zip   = self._get(row, "MAIL_ZIP",    "MAILZIP",    "ZIP")
+                                    "MAIL_ADDR",    "ADDR1",   "ADDRESS1")  # AGENT_OWNER uses ADDR1
+        mail_city  = self._get(row, "MAIL_CITY",   "MAILCITY",   "CITY",   "MAIL_CITY2")
+        mail_state = self._get(row, "MAIL_STATE",  "MAILSTATE",  "STATE")  or "TX"
+        mail_zip   = self._get(row, "MAIL_ZIP",    "MAILZIP",    "ZIP",    "ZIP5")
 
         entry = dict(
             prop_address=site_full, prop_city=site_city,
@@ -381,37 +443,89 @@ class ParcelIndex:
 
             names = zf.namelist()
 
-            # ── Priority 1: AGENT_OWNER file (has owner + address) ─────────
-            owner_files = [n for n in names
-                           if "AGENT_OWNER" in n.upper() or "OWNER_AGENT" in n.upper()
-                           if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
-                           if zf.getinfo(n).file_size > 1_000_000]  # must be substantive
-            # ── Priority 2: APPRAISAL_INFO (also has owner fields) ──────────
-            info_files  = [n for n in names
-                           if "APPRAISAL_INFO" in n.upper()
-                           if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
-                           if zf.getinfo(n).file_size > 1_000_000]
-            # ── Priority 3: any large TXT/CSV/DBF ───────────────────────────
-            big_files   = sorted(
+            # ── Step A: Find and parse header files for column layouts ───────
+            header_map: dict[str, list[tuple[str, int, int]]] = {}
+            for n in names:
+                if "HEADER" in n.upper() and Path(n).suffix.upper() == ".TXT":
+                    hdata = zf.read(n)
+                    cols = self._parse_header_txt(hdata, n)
+                    if cols:
+                        # Map header to its data file by stripping "HEADER" → ""
+                        base = n.upper().replace("_HEADER", "").replace("HEADER_", "")
+                        header_map[base] = cols
+                        # Also store by base name
+                        header_map[Path(n).stem.upper()] = cols
+                        log.info(f"[CAD] header {n} → {len(cols)} columns: "
+                                 f"{[c[0] for c in cols[:8]]}")
+
+            # ── Step B: Target files in priority order ───────────────────────
+            # Priority 1: AGENT_OWNER (owner name + mailing address)
+            owner_files = sorted(
+                [n for n in names
+                 if ("AGENT_OWNER" in n.upper() or "OWNER_AGENT" in n.upper()
+                     or "OWNER" in n.upper())
+                 if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
+                 if zf.getinfo(n).file_size > 100_000
+                 if "HEADER" not in n.upper()],
+                key=lambda n: zf.getinfo(n).file_size, reverse=True
+            )
+            # Priority 2: APPRAISAL_INFO
+            info_files = [n for n in names
+                          if "APPRAISAL_INFO" in n.upper()
+                          if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
+                          if zf.getinfo(n).file_size > 1_000_000
+                          if "HEADER" not in n.upper()]
+            # Priority 3: other large files
+            big_files = sorted(
                 [n for n in names
                  if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
-                 if zf.getinfo(n).file_size > 1_000_000],
+                 if zf.getinfo(n).file_size > 1_000_000
+                 if "HEADER" not in n.upper()
+                 if "DETAIL" not in n.upper()
+                 if "IMPROVEMENT" not in n.upper()],
                 key=lambda n: zf.getinfo(n).file_size, reverse=True
             )
 
             for candidate_list in (owner_files, info_files, big_files):
                 for name in candidate_list:
-                    log.info(f"[CAD] trying: {name} ({zf.getinfo(name).file_size:,} bytes)")
-                    rows = self._auto_parse(zf.read(name), name)
+                    sz = zf.getinfo(name).file_size
+                    log.info(f"[CAD] trying: {name} ({sz:,} bytes)")
+                    data_bytes = zf.read(name)
+
+                    # Find matching header layout
+                    cols = None
+                    name_upper = name.upper()
+                    for hkey, hcols in header_map.items():
+                        if hkey.replace("_HEADER", "") in name_upper or                            name_upper.replace("_HEADER", "") in hkey:
+                            cols = hcols
+                            log.info(f"[CAD] using header layout: {[c[0] for c in cols[:8]]}")
+                            break
+
+                    # If no header found but file looks fixed-width, use known GCAD layouts
+                    sample = data_bytes[:4000]
+                    is_pipe = b"|" in sample and sample.count(b"|") > 5
+                    if not cols and not is_pipe:
+                        cols = self._guess_fixed_width_layout(name, data_bytes)
+
+                    rows = self._auto_parse(data_bytes, name, cols)
                     if rows:
                         log.info(f"[CAD] sample keys: {list(rows[0].keys())[:16]}")
-                        break
+                        # Validate we got useful data
+                        owner_col = self._get(rows[0],
+                            "OWNER_NAME","OWNERNAME","OWNER","OWN1","NAME")
+                        if owner_col or len(rows) > 100:
+                            log.info(f"[CAD] sample owner: {owner_col!r}")
+                            break
+                        else:
+                            log.warning(f"[CAD] {name}: no owner column found, trying next")
+                            rows = []
                 if rows:
                     break
 
         except zipfile.BadZipFile:
             log.warning("[CAD] not a ZIP – trying raw parse")
-            rows = self._auto_parse(raw, url.split("/")[-1])
+            name_str = url.split("/")[-1]
+            rows = self._auto_parse(raw, name_str)
 
         log.info(f"[CAD] indexing {len(rows):,} rows…")
         for row in rows:
@@ -420,6 +534,61 @@ class ParcelIndex:
             except Exception:
                 pass
         log.info(f"[CAD] index built: {len(self._by_name):,} name keys")
+
+    def _guess_fixed_width_layout(self, name: str,
+                                   data: bytes) -> list[tuple[str, int, int]] | None:
+        """
+        Guess fixed-width column layout based on file name patterns.
+        Falls back to known GCAD standard layouts.
+        Uses first line as guide for record length.
+        """
+        name_upper = name.upper()
+
+        # Detect record length from first line
+        first_line = data.split(b"\n")[0].rstrip(b"\r")
+        rec_len = len(first_line)
+        log.info(f"[CAD] {name}: first-line length={rec_len}, guessing layout")
+
+        # GCAD AGENT_OWNER.TXT standard layout
+        # Confirmed from GCAD public documentation
+        if "AGENT_OWNER" in name_upper or "OWNER_AGENT" in name_upper:
+            return [
+                ("PROP_ID",        0,  19),
+                ("AGENT_CODE",    19,   2),
+                ("OWNER_SEQ",     21,   1),
+                ("OWNER_TYPE",    22,   1),
+                ("OWN_PCT",       23,   7),
+                ("OWNER_NAME",    30,  75),   # owner name
+                ("ADDR1",        105,  75),   # mailing address
+                ("ADDR2",        180,  75),   # address line 2
+                ("CITY",         255,  50),   # city
+                ("STATE",        305,   2),   # state
+                ("ZIP",          307,  10),   # zip
+                ("COUNTRY",      317,   3),
+            ]
+
+        # GCAD APPRAISAL_INFO.TXT - contains situs + owner
+        if "APPRAISAL_INFO" in name_upper:
+            return [
+                ("PROP_ID",        0,  19),
+                ("GEO_ID",        19,  50),
+                ("PROP_TYPE_CD",  69,   5),
+                ("PROP_VAL_YR",   74,   4),
+                ("LEGAL_DESC",   181, 255),   # legal description
+                ("SITUS_NUM",    436,  10),   # situs street number
+                ("SITUS_STREET", 446,  40),   # situs street name
+                ("SITUS_CITY",   486,  30),
+                ("SITUS_STATE",  516,   2),
+                ("SITUS_ZIP",    518,  10),
+                ("OWNER_ID",     528,  19),
+                ("OWNER_NAME",   547,  75),   # owner name (embedded)
+                ("MAIL_ADDR1",   622,  75),
+                ("MAIL_CITY",    697,  50),
+                ("MAIL_STATE",   747,   2),
+                ("MAIL_ZIP",     749,  10),
+            ]
+
+        return None
 
     def lookup(self, owner: str) -> dict:
         if not self._loaded:
@@ -567,6 +736,7 @@ class ClerkScraper:
 
         for code in AVA_SEARCH_CODES:
             try:
+                await self._clear_form(page)
                 await self._fill_form(page, doc_type=code,
                                       date_from=self.date_from, date_to=self.date_to)
                 await self._harvest(page, label=code)
@@ -587,27 +757,47 @@ class ClerkScraper:
         except Exception as exc:
             log.warning(f"[Clerk] broad search error: {exc}")
 
+    async def _clear_form(self, page):
+        """Clear all form inputs before a new search."""
+        try:
+            # Clear all visible text inputs
+            els = page.locator('input[type="text"]:visible, input:not([type]):visible')
+            n = await els.count()
+            for i in range(n):
+                try:
+                    el = els.nth(i)
+                    await el.triple_click()
+                    await el.press("Delete")
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     async def _fill_form(self, page, doc_type, date_from, date_to):
         """
-        Fill AVA search form.
-        AVA is a React MUI SPA. After clicking a tab the inputs render
-        asynchronously - we must wait for them to appear before filling.
-        Strategy:
-          1. Wait up to 8 s for at least one input to become visible
-          2. Log all input attributes for CI debugging
-          3. Try get_by_label() (works for MUI floating-label inputs)
-          4. Try attribute selectors (id / placeholder / aria-label)
-          5. Positional fallback: fill the N-th visible input by DOM order
-          6. JS nativeInputValueSetter as last resort for React-controlled inputs
+        Fill AVA Angular Material search form.
+        
+        Known DOM structure (confirmed from CI log 2026-04-28):
+          mat-input-0  placeholder='MM/DD/YYYY'      → Recorded Date From
+          mat-input-1  placeholder='MM/DD/YYYY'      → Recorded Date To
+          mat-input-2  placeholder='Document Type'   → Document Type (aria-label='Number')
+        
+        Angular Material (mat-input) requires click() to focus, then
+        type() character-by-character to trigger ngModel binding.
+        fill() and JS nativeInputValueSetter do NOT trigger Angular's
+        change detection reliably.
         """
-        # Wait for inputs to render after tab click
-        for wait_sel in ('input[type="text"]', 'input', 'textarea'):
+        # Wait for Angular Material inputs to render
+        for wait_sel in ('#mat-input-0', 'input[placeholder="MM/DD/YYYY"]',
+                         'input[type="text"]', 'input'):
             try:
-                await page.wait_for_selector(wait_sel, state="visible", timeout=8_000)
+                await page.wait_for_selector(wait_sel, state="visible", timeout=10_000)
+                log.info(f"[Clerk] form ready (matched {wait_sel!r})")
                 break
             except Exception:
                 pass
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1.0)
 
         # ── Log every input in the DOM so we can see real attribute names ──────
         await self._log_inputs(page)
@@ -619,144 +809,111 @@ class ClerkScraper:
         # ── Doc type ──────────────────────────────────────────────────────────
         if doc_type:
             filled = False
-            # MUI label-based (most reliable for React apps)
-            for lbl in ("Document Type", "Doc Type", "Instrument Type", "Type"):
+            # Known selector from DOM inspection: placeholder='Document Type'
+            for sel in [
+                'input[placeholder="Document Type"]',      # confirmed from logs
+                '#mat-input-2',                            # confirmed mat-input id
+                'input[placeholder*="Document"]',
+                'input[placeholder*="Type"]',
+                'input[id*="docType"]', 'input[id*="type"]',
+                'input[aria-label*="Type"]', 'input[aria-label*="Document"]',
+            ]:
                 try:
-                    el = page.get_by_label(re.compile(lbl, re.I)).first
+                    el = page.locator(sel).first
                     if await el.is_visible(timeout=2000):
-                        await self._fill_input(el, doc_type)
-                        log.info(f"[Clerk] doc_type via label {lbl!r}: {doc_type}")
+                        await self._angular_fill(page, el, doc_type)
+                        log.info(f"[Clerk] doc_type via {sel!r}: {doc_type}")
                         filled = True
                         break
                 except Exception:
                     pass
-            if not filled:
-                for sel in [
-                    'input[placeholder*="Doc"]', 'input[placeholder*="doc"]',
-                    'input[placeholder*="Type"]', 'input[placeholder*="Instrument"]',
-                    'input[id*="docType"]', 'input[id*="DocType"]',
-                    'input[id*="doc"]', 'input[id*="type"]',
-                    'input[name*="type"]', 'input[aria-label*="Type"]',
-                    'input[aria-label*="Document"]', 'input[aria-label*="Instrument"]',
-                ]:
-                    try:
-                        el = page.locator(sel).first
-                        if await el.is_visible(timeout=1500):
-                            await self._fill_input(el, doc_type)
-                            log.info(f"[Clerk] doc_type via {sel!r}: {doc_type}")
-                            filled = True
-                            break
-                    except Exception:
-                        pass
             if not filled and visible:
                 try:
-                    await self._fill_input(visible[0], doc_type)
+                    await self._angular_fill(page, visible[0], doc_type)
                     log.info(f"[Clerk] doc_type via pos[0] fallback: {doc_type}")
                 except Exception:
                     pass
 
         # ── Date-from ─────────────────────────────────────────────────────────
+        # Confirmed from CI logs: mat-input-0 with placeholder='MM/DD/YYYY' is date-from
         filled_from = False
-        # MUI label approach first
-        for lbl in ("Recorded Date From", "Begin Date", "Start Date",
-                    "Date From", "From Date", "Filing Date From", "From"):
+        for sel in [
+            '#mat-input-0',                          # confirmed Angular mat-input id
+            'input[placeholder="MM/DD/YYYY"]:nth-of-type(1)',
+            'input[id*="dateFrom"]', 'input[id*="DateFrom"]',
+            'input[id*="beginDate"]', 'input[id*="RecordedDateFrom"]',
+            'input[aria-label*="From"]', 'input[aria-label*="Start"]',
+            'input[name*="from"]', 'input[name*="begin"]',
+        ]:
             try:
-                el = page.get_by_label(re.compile(lbl, re.I)).first
+                el = page.locator(sel).first
                 if await el.is_visible(timeout=2000):
-                    await self._fill_input(el, date_from)
-                    log.info(f"[Clerk] date_from via label {lbl!r}: {date_from}")
+                    await self._angular_fill(page, el, date_from)
+                    log.info(f"[Clerk] date_from via {sel!r}: {date_from}")
                     filled_from = True
                     break
             except Exception:
                 pass
-        if not filled_from:
-            for sel in [
-                'input[placeholder*="From"]', 'input[placeholder*="from"]',
-                'input[placeholder*="Start"]', 'input[placeholder*="Begin"]',
-                'input[id*="dateFrom"]', 'input[id*="DateFrom"]',
-                'input[id*="beginDate"]', 'input[id*="startDate"]',
-                'input[id*="RecordedDateFrom"]', 'input[id*="FiledDateFrom"]',
-                'input[name*="from"]', 'input[name*="begin"]',
-                'input[aria-label*="From"]', 'input[aria-label*="Start"]',
-            ]:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=1500):
-                        await self._fill_input(el, date_from)
-                        log.info(f"[Clerk] date_from via {sel!r}: {date_from}")
-                        filled_from = True
-                        break
-                except Exception:
-                    pass
 
-        # Positional fallback: second-to-last input is typically date-from
-        if not filled_from and len(visible) >= 2:
-            try:
-                await self._fill_input(visible[-2], date_from)
-                log.info(f"[Clerk] date_from via pos[-2] fallback: {date_from}")
-                filled_from = True
-            except Exception:
-                pass
-        elif not filled_from and len(visible) == 1:
-            try:
-                await self._fill_input(visible[0], date_from)
-                log.info(f"[Clerk] date_from via pos[0] fallback: {date_from}")
-                filled_from = True
-            except Exception:
-                pass
-        # JS React nativeInputValueSetter last resort
+        # Positional: mat-input-0 = index 2 in DOM order (after Last Name, First Name)
         if not filled_from:
+            date_inputs = page.locator('input[placeholder="MM/DD/YYYY"]')
             try:
-                await self._js_fill_nth_input(page, -2 if len(visible) >= 2 else 0,
-                                              date_from, "date_from")
+                n = await date_inputs.count()
+                if n >= 1:
+                    await self._angular_fill(page, date_inputs.nth(0), date_from)
+                    log.info(f"[Clerk] date_from via MM/DD/YYYY[0]: {date_from}")
+                    filled_from = True
+            except Exception:
+                pass
+
+        if not filled_from and len(visible) >= 3:
+            try:
+                await self._angular_fill(page, visible[2], date_from)
+                log.info(f"[Clerk] date_from via pos[2] fallback: {date_from}")
                 filled_from = True
             except Exception:
                 pass
 
         # ── Date-to ───────────────────────────────────────────────────────────
+        # Confirmed: mat-input-1 with placeholder='MM/DD/YYYY' is date-to
         filled_to = False
-        for lbl in ("Recorded Date To", "End Date", "Date To", "To Date",
-                    "Filing Date To", "Thru Date", "To"):
+        for sel in [
+            '#mat-input-1',                          # confirmed Angular mat-input id
+            'input[id*="dateTo"]', 'input[id*="DateTo"]',
+            'input[id*="endDate"]', 'input[id*="RecordedDateTo"]',
+            'input[aria-label*="To"]', 'input[aria-label*="End"]',
+            'input[name*="to"]', 'input[name*="end"]',
+        ]:
             try:
-                el = page.get_by_label(re.compile(lbl, re.I)).first
+                el = page.locator(sel).first
                 if await el.is_visible(timeout=2000):
-                    await self._fill_input(el, date_to)
-                    log.info(f"[Clerk] date_to via label {lbl!r}: {date_to}")
+                    await self._angular_fill(page, el, date_to)
+                    log.info(f"[Clerk] date_to via {sel!r}: {date_to}")
                     filled_to = True
                     break
             except Exception:
                 pass
-        if not filled_to:
-            for sel in [
-                'input[placeholder*="To"]', 'input[placeholder*="to"]',
-                'input[placeholder*="End"]', 'input[placeholder*="Thru"]',
-                'input[id*="dateTo"]', 'input[id*="DateTo"]',
-                'input[id*="endDate"]', 'input[id*="toDate"]',
-                'input[id*="RecordedDateTo"]', 'input[id*="FiledDateTo"]',
-                'input[name*="to"]', 'input[name*="end"]',
-                'input[aria-label*="To"]', 'input[aria-label*="End"]',
-            ]:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=1500):
-                        await self._fill_input(el, date_to)
-                        log.info(f"[Clerk] date_to via {sel!r}: {date_to}")
-                        filled_to = True
-                        break
-                except Exception:
-                    pass
 
-        # Positional fallback: last visible input is typically date-to
-        if not filled_to and visible:
+        # Positional: second MM/DD/YYYY input
+        if not filled_to:
+            date_inputs = page.locator('input[placeholder="MM/DD/YYYY"]')
             try:
-                await self._fill_input(visible[-1], date_to)
-                log.info(f"[Clerk] date_to via pos[-1] fallback: {date_to}")
-                filled_to = True
+                n = await date_inputs.count()
+                if n >= 2:
+                    await self._angular_fill(page, date_inputs.nth(1), date_to)
+                    log.info(f"[Clerk] date_to via MM/DD/YYYY[1]: {date_to}")
+                    filled_to = True
+                elif n == 1:
+                    # Only one date field; already filled as date_from - skip
+                    pass
             except Exception:
                 pass
-        if not filled_to:
+
+        if not filled_to and visible:
             try:
-                await self._js_fill_nth_input(page, -1, date_to, "date_to")
+                await self._angular_fill(page, visible[-1], date_to)
+                log.info(f"[Clerk] date_to via pos[-1] fallback: {date_to}")
                 filled_to = True
             except Exception:
                 pass
@@ -849,6 +1006,35 @@ class ClerkScraper:
         await el.fill(value)
         await el.press("Tab")
         await asyncio.sleep(0.25)
+
+    @staticmethod
+    async def _angular_fill(page, el, value: str):
+        """
+        Fill an Angular Material (mat-input) field correctly.
+        Angular requires the actual keyboard events to trigger ngModel updates.
+        Strategy: click → Ctrl+A → Delete → type char-by-char → Tab
+        """
+        try:
+            await el.click()
+            await asyncio.sleep(0.15)
+            await el.press("Control+a")
+            await el.press("Delete")
+            await el.type(value, delay=40)   # type() sends real key events
+            await el.press("Tab")
+            await asyncio.sleep(0.3)
+        except Exception:
+            # Fallback: fill() + dispatch input event
+            try:
+                await el.triple_click()
+                await el.fill(value)
+                await page.evaluate(
+                    "(el) => el.dispatchEvent(new Event('input', {bubbles:true}))",
+                    await el.element_handle()
+                )
+                await el.press("Tab")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
 
     async def _js_fill_nth_input(self, page, idx: int, value: str, label: str):
         """
