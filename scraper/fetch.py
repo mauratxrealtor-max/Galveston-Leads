@@ -448,15 +448,30 @@ class ParcelIndex:
             for n in names:
                 if "HEADER" in n.upper() and Path(n).suffix.upper() == ".TXT":
                     hdata = zf.read(n)
+                    # Always log raw header content so we can see real column names
+                    log.info(f"[CAD] header raw ({n}, {len(hdata)}b): "
+                             f"{hdata.decode('latin-1','replace').strip()[:200]!r}")
                     cols = self._parse_header_txt(hdata, n)
                     if cols:
-                        # Map header to its data file by stripping "HEADER" → ""
+                        # Map header to its data file by stripping "HEADER"
                         base = n.upper().replace("_HEADER", "").replace("HEADER_", "")
                         header_map[base] = cols
-                        # Also store by base name
                         header_map[Path(n).stem.upper()] = cols
+                        # Extra: also map with OWNER_AGENT ↔ AGENT_OWNER swapped
+                        swapped = base.replace("OWNER_AGENT", "AGENT_OWNER")                                      .replace("AGENT_OWNER", "OWNER_AGENT")
+                        header_map[swapped] = cols
                         log.info(f"[CAD] header {n} → {len(cols)} columns: "
                                  f"{[c[0] for c in cols[:8]]}")
+                    else:
+                        # Header didn't parse as positional – might be field-name-only
+                        # Treat as pipe-delimited field list (positional columns)
+                        field_names = [p.strip().upper()
+                                       for p in hdata.decode('latin-1','replace').split('|')
+                                       if p.strip()]
+                        if len(field_names) >= 3:
+                            log.info(f"[CAD] header fields only ({n}): {field_names}")
+                            # Store as field-name list for positional matching
+                            header_map[Path(n).stem.upper() + "_FIELDS"] = field_names
 
             # ── Step B: Target files in priority order ───────────────────────
             # Priority 1: AGENT_OWNER (owner name + mailing address)
@@ -495,10 +510,24 @@ class ParcelIndex:
                     # Find matching header layout
                     cols = None
                     name_upper = name.upper()
+                    name_stem  = Path(name).stem.upper()
                     for hkey, hcols in header_map.items():
-                        if hkey.replace("_HEADER", "") in name_upper or                            name_upper.replace("_HEADER", "") in hkey:
+                        if not isinstance(hcols, list) or not hcols:
+                            continue
+                        if not isinstance(hcols[0], tuple):
+                            continue  # field-name list, skip
+                        hkey_clean = hkey.replace("_HEADER","").replace("HEADER_","")
+                        # Flexible match: handle OWNER_AGENT <-> AGENT_OWNER swaps
+                        swapped_name = name_upper.replace("AGENT_OWNER","OWNER_AGENT")
+                        swapped_key  = hkey_clean.replace("OWNER_AGENT","AGENT_OWNER")
+                        if (hkey_clean in name_upper or name_upper in hkey_clean
+                                or name_stem in hkey or hkey in name_stem
+                                or swapped_name in hkey_clean
+                                or hkey_clean in swapped_name
+                                or swapped_key in name_upper):
                             cols = hcols
-                            log.info(f"[CAD] using header layout: {[c[0] for c in cols[:8]]}")
+                            log.info(f"[CAD] matched header '{hkey}' to {name}: "
+                                     f"{[c[0] for c in cols[:8]]}")
                             break
 
                     # If no header found but file looks fixed-width, use known GCAD layouts
@@ -506,6 +535,17 @@ class ParcelIndex:
                     is_pipe = b"|" in sample and sample.count(b"|") > 5
                     if not cols and not is_pipe:
                         cols = self._guess_fixed_width_layout(name, data_bytes)
+                    elif cols:
+                        # Validate: if header-derived cols don't look right, fall back to guess
+                        test_rows = self._parse_fixed_width(data_bytes[:4000], name, cols)
+                        if test_rows:
+                            test_owner = self._get(test_rows[0],
+                                "OWNER_NAME","OWNERNAME","OWNER","OWN1","NAME")
+                            # Owner should look like a name, not a numeric ID
+                            if test_owner and re.match(r'^[\d\s]+$', test_owner.strip()):
+                                log.warning(f"[CAD] header layout gave numeric owner "
+                                            f"{test_owner!r} – falling back to guess")
+                                cols = self._guess_fixed_width_layout(name, data_bytes)
 
                     rows = self._auto_parse(data_bytes, name, cols)
                     if rows:
@@ -550,22 +590,44 @@ class ParcelIndex:
         log.info(f"[CAD] {name}: first-line length={rec_len}, guessing layout")
 
         # GCAD AGENT_OWNER.TXT standard layout
-        # Confirmed from GCAD public documentation
+        # Record length = 1299 bytes (confirmed from CI log 2026-04-29).
+        # OWNER_ID (19 chars) sits between OWN_PCT and OWNER_NAME.
+        # Owner name + addresses are wider in this export vintage.
         if "AGENT_OWNER" in name_upper or "OWNER_AGENT" in name_upper:
-            return [
-                ("PROP_ID",        0,  19),
-                ("AGENT_CODE",    19,   2),
-                ("OWNER_SEQ",     21,   1),
-                ("OWNER_TYPE",    22,   1),
-                ("OWN_PCT",       23,   7),
-                ("OWNER_NAME",    30,  75),   # owner name
-                ("ADDR1",        105,  75),   # mailing address
-                ("ADDR2",        180,  75),   # address line 2
-                ("CITY",         255,  50),   # city
-                ("STATE",        305,   2),   # state
-                ("ZIP",          307,  10),   # zip
-                ("COUNTRY",      317,   3),
-            ]
+            # Narrow by actual record length to pick the right layout
+            if rec_len > 600:
+                # Wide/modern format (1299-byte records)
+                return [
+                    ("PROP_ID",        0,  19),
+                    ("AGENT_CODE",    19,   2),
+                    ("OWNER_SEQ",     21,   1),
+                    ("OWNER_TYPE",    22,   1),
+                    ("OWN_PCT",       23,   7),
+                    ("OWNER_ID",      30,  19),   # numeric owner ID
+                    ("OWNER_NAME",    49, 120),   # owner name (120 chars wide)
+                    ("ADDR1",        169,  75),   # mailing address line 1
+                    ("ADDR2",        244,  75),   # address line 2
+                    ("CITY",         319,  50),   # city
+                    ("STATE",        369,   2),   # state
+                    ("ZIP",          371,  10),   # zip
+                    ("COUNTRY",      381,   3),
+                ]
+            else:
+                # Narrow/legacy format (~320-byte records)
+                return [
+                    ("PROP_ID",        0,  19),
+                    ("AGENT_CODE",    19,   2),
+                    ("OWNER_SEQ",     21,   1),
+                    ("OWNER_TYPE",    22,   1),
+                    ("OWN_PCT",       23,   7),
+                    ("OWNER_NAME",    30,  75),   # owner name
+                    ("ADDR1",        105,  75),   # mailing address
+                    ("ADDR2",        180,  75),
+                    ("CITY",         255,  50),
+                    ("STATE",        305,   2),
+                    ("ZIP",          307,  10),
+                    ("COUNTRY",      317,   3),
+                ]
 
         # GCAD APPRAISAL_INFO.TXT - contains situs + owner
         if "APPRAISAL_INFO" in name_upper:
@@ -1069,6 +1131,16 @@ class ClerkScraper:
             await asyncio.sleep(1)
             try:
                 html = await page.content()
+                # Save first page HTML for debugging
+                if p_num == 1:
+                    try:
+                        with open(f"/tmp/ava_results_{label}_p1.html", "w",
+                                  encoding="utf-8", errors="replace") as f:
+                            f.write(html)
+                        log.info(f"[Clerk] saved results HTML: "
+                                 f"/tmp/ava_results_{label}_p1.html")
+                    except Exception:
+                        pass
                 recs = [r for r in self._parse_html(html, page.url)
                         if self._accept(r)]
                 if recs:
@@ -1126,31 +1198,81 @@ class ClerkScraper:
         soup = BeautifulSoup(html, "lxml")
         records: list[dict] = []
 
-        # Table-based results
-        for table in soup.find_all("table"):
-            ths = table.find_all("th")
-            headers = [th.get_text(" ", strip=True).lower() for th in ths]
-            if not any(kw in " ".join(headers) for kw in
-                       ["doc", "type", "instrument", "filed", "grantor",
-                        "recorded", "book", "page"]):
-                continue
-            for tr in table.find_all("tr")[1:]:
-                tds = tr.find_all("td")
-                if len(tds) < 2:
+        # ── Strategy 0: Angular Material mat-table (AVA uses this) ─────────
+        # AVA renders results as <mat-table> with <mat-header-row> and <mat-row>
+        # or <table mat-table> with <tr mat-header-row> and <tr mat-row>
+        for mat_table in soup.find_all(["mat-table", "table"], attrs={"class": True}):
+            classes = " ".join(mat_table.get("class", []))
+            if "mat-table" not in classes and mat_table.name != "mat-table":
+                if "cdk-table" not in classes:
                     continue
-                rec = self._from_tds(tds, headers, url)
+            # Get headers from mat-header-cell or th
+            header_cells = mat_table.find_all(["mat-header-cell", "th"])
+            headers = [h.get_text(" ", strip=True).lower() for h in header_cells]
+            if not headers:
+                continue
+            log.info(f"[Clerk] mat-table headers: {headers}")
+            # Get data rows from mat-row or tr[mat-row]
+            for row_el in mat_table.find_all(["mat-row", "tr"]):
+                if row_el.get("class") and "mat-header-row" in " ".join(row_el.get("class",[])):
+                    continue
+                cells = row_el.find_all(["mat-cell", "td"])
+                if len(cells) < 2:
+                    continue
+                rec = self._from_tds(cells, headers, url)
                 if rec:
                     records.append(rec)
 
-        # Card / row divs
+        # ── Strategy 1: Plain HTML tables ─────────────────────────────────────
+        if not records:
+            for table in soup.find_all("table"):
+                ths = table.find_all("th")
+                headers = [th.get_text(" ", strip=True).lower() for th in ths]
+                if not any(kw in " ".join(headers) for kw in
+                           ["doc", "type", "instrument", "filed", "grantor",
+                            "recorded", "book", "page", "number"]):
+                    continue
+                for tr in table.find_all("tr")[1:]:
+                    tds = tr.find_all("td")
+                    if len(tds) < 2:
+                        continue
+                    rec = self._from_tds(tds, headers, url)
+                    if rec:
+                        records.append(rec)
+
+        # ── Strategy 2: Any repeated div/li rows ──────────────────────────────
         if not records:
             for el in soup.select(
+                "mat-row, [class*='mat-row'], "
                 "div.result-row, div.record-item, div[class*='document'], "
-                "div[class*='result'], li.document-result"
+                "div[class*='result'], li.document-result, "
+                "tr[class*='result'], tr[class*='document']"
             ):
                 rec = self._from_card(el, url)
                 if rec:
                     records.append(rec)
+
+        # ── Strategy 3: Log what WAS found so we can debug ────────────────────
+        if not records:
+            # Log structural hints from the page
+            all_text = soup.get_text(" ", strip=True)
+            if re.search(r"\d{4,}", all_text):
+                # Page has numeric content - might be results
+                # Check for any element containing doc-number-like patterns
+                for el in soup.find_all(string=re.compile(
+                        r"\d{4,14}.*(LP|JUD|LIEN|LIS|PENDENS|FORECLOSURE)",
+                        re.I)):
+                    parent = el.parent
+                    while parent and parent.name not in ("div","tr","li","section"):
+                        parent = parent.parent
+                    if parent:
+                        rec = self._from_card(parent, url)
+                        if rec:
+                            records.append(rec)
+
+            # Always log a snippet of the page for debugging
+            snippet = all_text[:500].replace("\n", " ")
+            log.info(f"[Clerk] page text snippet: {snippet!r}")
 
         # JSON in scripts
         if not records:
