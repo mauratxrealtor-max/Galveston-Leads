@@ -1,9 +1,9 @@
 {
-  "fetched_at": "2026-04-28T14:22:48.888741Z",
+  "fetched_at": "2026-04-29T00:19:48.249460Z",
   "source": "Galveston County Clerk (AVA) + GCAD Parcel Data",
   "date_range": {
-    "from": "2026-01-28",
-    "to": "2026-04-28"
+    "from": "2026-01-29",
+    "to": "2026-04-29"
   },
   "total": 0,
   "with_address": 0,
