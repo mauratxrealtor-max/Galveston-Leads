@@ -54,12 +54,14 @@ jobs:
           PYTHONUNBUFFERED: "1"
 
       # ── 6. Upload debug screenshots ──────────────────────────────────────
-      - name: Upload debug screenshots
+      - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ava-debug-screenshots
-          path: /tmp/ava_*.png
+          name: ava-debug-artifacts
+          path: |
+            /tmp/ava_*.png
+            /tmp/ava_results_*.html
           if-no-files-found: ignore
           retention-days: 7
 
