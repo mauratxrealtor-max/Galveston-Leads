@@ -669,20 +669,43 @@ class ParcelIndex:
 
     @staticmethod
     def _scan_name_offset(lines: list[bytes], rec_len: int) -> int | None:
-        """Find where owner names appear: uppercase alpha+space+comma, 10+ chars."""
+        """
+        Find where owner names appear.
+        Owner names look like: "SMITH, JOHN" or "ABC PROPERTIES LLC" or "JONES MARY E"
+        They have: commas OR mixed short/long words OR "LLC/INC/TRUST/LTD"
+        Cities look like: "GALVESTON    TX" or "FRIENDSWOOD    TX" (city + state abbrev)
+        We reject patterns that look like city+state.
+        """
         import re as _re
-        pat = _re.compile(rb"[A-Z][A-Z ,.\-']{9,}[A-Z]")
+        name_pat  = _re.compile(rb"[A-Z][A-Z ,.\-']{9,}[A-Z]")
+        # City pattern: city name followed by 2-char state abbreviation with spaces
+        city_pat  = _re.compile(rb"[A-Z]{4,}\s{2,}[A-Z]{2}\s*$")
+        # Name quality indicators: comma (LAST, FIRST) or LLC/INC/CORP/TRUST
+        name_qual = _re.compile(rb"(,\s*[A-Z]|LLC|INC|CORP|TRUST|LTD|L\.P\.|ESTATE)")
+
         votes: dict[int, int] = {}
         for line in lines:
             if len(line) < 60:
                 continue
-            for m in pat.finditer(line[19:]):
+            for m in name_pat.finditer(line[19:]):
                 off = m.start() + 19
-                val = m.group().decode("latin-1","replace")
-                # Reject if too few distinct chars (e.g. repeated spaces)
-                if len(set(val.replace(" ","").replace(",",""))) < 3:
+                val = m.group()
+                val_str = val.decode("latin-1","replace")
+
+                # Reject if too few distinct chars
+                if len(set(val_str.replace(" ","").replace(",",""))) < 3:
                     continue
-                votes[off] = votes.get(off, 0) + 1
+                # Reject if it looks like a city+state pattern
+                if city_pat.search(val):
+                    continue
+                # Boost score if it has name-quality indicators
+                score = 1
+                if name_qual.search(val):
+                    score = 3
+                elif b"," in val:
+                    score = 2
+                votes[off] = votes.get(off, 0) + score
+
         if not votes:
             return None
         best = max(votes, key=votes.get)
@@ -1206,6 +1229,142 @@ class ClerkScraper:
         except Exception as exc:
             log.warning(f"[Clerk] JS fill failed for {label}: {exc}")
 
+    async def _js_extract_results(self, page) -> list[dict]:
+        """
+        Extract search results directly from AVA's Angular DOM via JavaScript.
+        AVA renders results in a virtual scroll container as repeated div rows.
+        We extract every visible text row and parse doc number / type / date / party.
+        """
+        try:
+            raw_rows = await page.evaluate("""() => {
+                const results = [];
+
+                // Strategy 1: find repeating result rows by common AVA class patterns
+                const rowSelectors = [
+                    '.search-result-row',
+                    '.result-item',
+                    '.document-row',
+                    '[class*="result-row"]',
+                    '[class*="search-result"]',
+                    'cdk-virtual-scroll-viewport > div > div',
+                    '.cdk-virtual-scroll-content-wrapper > *',
+                    '.mat-list-item',
+                    'mat-list-item',
+                ];
+                for (const sel of rowSelectors) {
+                    const els = document.querySelectorAll(sel);
+                    if (els.length > 0) {
+                        els.forEach(el => {
+                            const txt = el.innerText || el.textContent || '';
+                            if (txt.trim().length > 10) results.push(txt.trim());
+                        });
+                        if (results.length > 0) break;
+                    }
+                }
+
+                // Strategy 2: find ALL text nodes in the results container
+                if (results.length === 0) {
+                    const containers = document.querySelectorAll(
+                        '[class*="result"], [class*="search"], [id*="result"], ' +
+                        'cdk-virtual-scroll-viewport, .mat-table, mat-table'
+                    );
+                    for (const c of containers) {
+                        const txt = c.innerText || c.textContent || '';
+                        if (txt.length > 50) {
+                            results.push(txt.trim());
+                            break;
+                        }
+                    }
+                }
+
+                // Strategy 3: get all text from body, let Python parse it
+                if (results.length === 0) {
+                    results.push(document.body.innerText || '');
+                }
+
+                return results;
+            }""")
+
+            # Now parse the extracted text
+            records = []
+            full_text = " ".join(raw_rows)
+
+            # Parse document records from the AVA results text
+            # Pattern from observed output:
+            # "2026019373 CERTIFIED COPY 4/28/2026 4:32:41 PM UNOFFICIAL"
+            # "2026019372 RELEASE 4/28/2026 4:26:13 PM UNOFFICIAL"
+            records = self._parse_ava_text(full_text, page.url)
+            if records:
+                log.info(f"[Clerk] JS extracted {len(records)} records from page text")
+            return records
+
+        except Exception as exc:
+            log.warning(f"[Clerk] JS extraction failed: {exc}")
+            return []
+
+    def _parse_ava_text(self, text: str, url: str) -> list[dict]:
+        """
+        Parse AVA results text.
+        Format (confirmed from CI log 2026-04-29):
+          Results: N
+          Document No  Document Type  Recorded Date  Party1  Party2  Legals
+          2026019373  CERTIFIED COPY  4/28/2026 4:32:41 PM  UNOFFICIAL
+          [detail block with same doc num]
+          2026019372  RELEASE  4/28/2026 4:26:13 PM  UNOFFICIAL
+          ...
+        """
+        records = []
+        seen_in_text: set[str] = set()
+
+        # Match doc number: 10-13 digit number at start of a token group
+        # Followed by doc type words, then a date
+        # Pattern: DOCNUM  DOC_TYPE_WORDS  MM/DD/YYYY  HH:MM:SS AM/PM  [PARTY]
+        pattern = re.compile(
+            r"(\d{7,13})"                       # doc number
+            r"\s+"
+            r"([A-Z][A-Z /&\-,]{2,50}?)"        # doc type (uppercase words)
+            r"\s+"
+            r"(\d{1,2}/\d{1,2}/\d{4})"          # date MM/DD/YYYY
+            r"(?:\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)?"  # optional time
+            r"(?:\s+([A-Z][A-Z .,&'-]{2,60}))?",  # optional party1
+            re.MULTILINE
+        )
+
+        for m in pattern.finditer(text):
+            doc_num  = m.group(1).strip()
+            doc_type = m.group(2).strip().rstrip(",").strip()
+            filed    = normalize_date(m.group(3))
+            party1   = (m.group(4) or "").strip().rstrip("Page").strip()
+
+            # Skip duplicate doc numbers (detail block appears twice in text)
+            if doc_num in seen_in_text:
+                continue
+            seen_in_text.add(doc_num)
+
+            # Skip obvious non-document tokens
+            if len(doc_num) < 7:
+                continue
+            if doc_type.upper() in ("DOCUMENT NO", "DOC", "NUMBER", "RESULTS"):
+                continue
+
+            # Build direct URL to this document
+            direct_url = f"https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/{doc_num}"
+
+            records.append({
+                "doc_num":   doc_num,
+                "raw_type":  doc_type,
+                "filed":     filed,
+                "owner":     party1,
+                "grantee":   "",
+                "legal":     "",
+                "amount":    None,
+                "clerk_url": direct_url,
+            })
+
+        log.info(f"[Clerk] _parse_ava_text: {len(records)} records from "
+                 f"{len(text)} chars of text")
+        return records
+
     async def _harvest(self, page, label: str = ""):
         p_num = 0
         empty_streak = 0
@@ -1213,10 +1372,10 @@ class ClerkScraper:
             p_num += 1
             await asyncio.sleep(1)
             try:
-                html = await page.content()
                 # Save first page HTML for debugging
                 if p_num == 1:
                     try:
+                        html = await page.content()
                         with open(f"/tmp/ava_results_{label}_p1.html", "w",
                                   encoding="utf-8", errors="replace") as f:
                             f.write(html)
@@ -1224,6 +1383,26 @@ class ClerkScraper:
                                  f"/tmp/ava_results_{label}_p1.html")
                     except Exception:
                         pass
+
+                # Primary: JS extraction (works with Angular virtual scroll)
+                js_recs = await self._js_extract_results(page)
+                if js_recs:
+                    recs = [r for r in js_recs if self._accept(r)]
+                    if recs:
+                        self.records.extend(recs)
+                        for r in recs:
+                            self._seen.add(r.get("doc_num", str(r)[:80]))
+                        empty_streak = 0
+                        log.info(f"[Clerk][{label}] p{p_num}: +{len(recs)} JS "
+                                 f"(total={len(self.records)})")
+                    else:
+                        empty_streak += 1
+                    if not await self._next_page(page):
+                        break
+                    continue
+
+                # Fallback: HTML parsing
+                html = await page.content()
                 recs = [r for r in self._parse_html(html, page.url)
                         if self._accept(r)]
                 if recs:
