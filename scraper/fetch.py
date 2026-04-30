@@ -641,12 +641,27 @@ class ClerkScraper:
         log.info(f"[Clerk] page title: {await page.title()}")
         log.info(f"[Clerk] URL: {page.url}")
 
-        # Strategy: search by Document Type (plain text input, no date picker needed).
-        # AVA returns all records for each doc type; we filter by date in Python.
-        # This avoids the Angular Material datepicker issue entirely.
+        # Step 1: Broad date-range search (PROVEN to work — dates only, no doc type)
+        # Returns up to 300 records across all doc types.
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                await self._search_by_doc_type_field(page)
+                await self._search_broad_with_dates(page)
+                break
+            except Exception as exc:
+                log.warning(f"[Clerk] broad search attempt {attempt+1}: {exc}")
+                await asyncio.sleep(RETRY_DELAY)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                    await self._dismiss(page)
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass
+
+        # Step 2: Per-doc-type searches (dates + doc type) to capture
+        # records beyond the 300-result cap and ensure full coverage.
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                await self._search_each_doc_type_with_dates(page)
                 break
             except Exception as exc:
                 log.warning(f"[Clerk] doc-type search attempt {attempt+1}: {exc}")
@@ -657,6 +672,152 @@ class ClerkScraper:
                     await asyncio.sleep(3)
                 except Exception:
                     pass
+
+    async def _search_broad_with_dates(self, page):
+        """
+        Broad date-range search — PROVEN WORKING in CI run 2026-04-30 12:19.
+        Fills mat-input-0 (date_from) and mat-input-1 (date_to) via _angular_fill,
+        leaves Document Type empty. Returns up to 300 mixed records.
+        """
+        log.info("[Clerk] running broad date-range search (proven approach)…")
+
+        await self._find_and_click_tab(page, ["Search", "Quick Search"])
+        await asyncio.sleep(1)
+        await self._clear_form(page)
+
+        # Wait for mat-input-0 to be present (confirmed in working run)
+        try:
+            await page.wait_for_selector('#mat-input-0', state='visible', timeout=10_000)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+        # Fill date_from (mat-input-0) — PROVEN WORKING
+        filled_from = False
+        el = page.locator('#mat-input-0').first
+        if await el.is_visible(timeout=3000):
+            await self._angular_fill(page, el, self.date_from)
+            log.info(f"[Clerk] broad: date_from → {self.date_from}")
+            filled_from = True
+
+        if not filled_from:
+            date_inputs = page.locator('input[placeholder="MM/DD/YYYY"]')
+            if await date_inputs.count() >= 1:
+                await self._angular_fill(page, date_inputs.nth(0), self.date_from)
+                log.info(f"[Clerk] broad: date_from via placeholder → {self.date_from}")
+
+        # Fill date_to (mat-input-1) — PROVEN WORKING
+        filled_to = False
+        el = page.locator('#mat-input-1').first
+        if await el.is_visible(timeout=3000):
+            await self._angular_fill(page, el, self.date_to)
+            log.info(f"[Clerk] broad: date_to → {self.date_to}")
+            filled_to = True
+
+        if not filled_to:
+            date_inputs = page.locator('input[placeholder="MM/DD/YYYY"]')
+            if await date_inputs.count() >= 2:
+                await self._angular_fill(page, date_inputs.nth(1), self.date_to)
+                log.info(f"[Clerk] broad: date_to via placeholder → {self.date_to}")
+
+        await self._ss(page, "broad_form_filled")
+
+        # Submit
+        for btn_label in ("Search", "Submit", "Find"):
+            try:
+                btn = page.get_by_role("button",
+                      name=re.compile(f"^{btn_label}$", re.I))
+                if await btn.count():
+                    await btn.first.click()
+                    log.info(f"[Clerk] broad: submitted via '{btn_label}'")
+                    break
+            except Exception:
+                pass
+
+        await asyncio.sleep(4)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            await asyncio.sleep(2)
+
+        await self._log_result_state(page, "BROAD")
+        await self._harvest(page, label="BROAD")
+
+    async def _search_each_doc_type_with_dates(self, page):
+        """
+        Per-doc-type searches with dates filled — for full coverage beyond 300-cap.
+        Fills all three fields: date_from + date_to + doc_type.
+        """
+        log.info("[Clerk] running per-doc-type searches with dates…")
+
+        for code in AVA_SEARCH_CODES:
+            try:
+                await self._find_and_click_tab(page, ["Search","Quick Search"])
+                await asyncio.sleep(1)
+                await self._clear_form(page)
+                await asyncio.sleep(0.3)
+
+                # Wait for form inputs
+                try:
+                    await page.wait_for_selector('#mat-input-0',
+                                                  state='visible', timeout=8_000)
+                except Exception:
+                    pass
+
+                # Fill date_from
+                el = page.locator('#mat-input-0').first
+                if await el.is_visible(timeout=3000):
+                    await self._angular_fill(page, el, self.date_from)
+
+                # Fill date_to
+                el = page.locator('#mat-input-1').first
+                if await el.is_visible(timeout=3000):
+                    await self._angular_fill(page, el, self.date_to)
+
+                # Fill Document Type (mat-input-2, plain text — works fine)
+                el = page.locator('#mat-input-2').first
+                if await el.is_visible(timeout=3000):
+                    await self._angular_fill(page, el, code)
+                    log.info(f"[Clerk] {code}: dates + doc type filled")
+
+                # Submit
+                for btn_label in ("Search", "Submit", "Find"):
+                    try:
+                        btn = page.get_by_role("button",
+                              name=re.compile(f"^{btn_label}$", re.I))
+                        if await btn.count():
+                            await btn.first.click()
+                            break
+                    except Exception:
+                        pass
+
+                await asyncio.sleep(4)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                except Exception:
+                    await asyncio.sleep(2)
+
+                await self._log_result_state(page, code)
+                await self._harvest(page, label=code)
+
+            except Exception as exc:
+                log.warning(f"[Clerk] {code} search failed: {exc}")
+            await asyncio.sleep(0.5)
+
+    async def _log_result_state(self, page, label: str):
+        """Log page title, URL, text snippet and mat-row count after a search."""
+        try:
+            title = await page.title()
+            url   = page.url
+            txt   = await page.evaluate("()=>document.body.innerText")
+            snippet = txt.replace("\n"," ")[:400]
+            log.info(f"[Clerk][{label}] url={url}")
+            log.info(f"[Clerk][{label}] text={snippet!r}")
+            rows = await page.locator(
+                "mat-row, tr[mat-row], [class*=mat-row]").count()
+            log.info(f"[Clerk][{label}] mat-rows={rows}")
+        except Exception as e:
+            log.warning(f"[Clerk][{label}] log_result_state failed: {e}")
 
     async def _search_by_doc_type_field(self, page):
         """
