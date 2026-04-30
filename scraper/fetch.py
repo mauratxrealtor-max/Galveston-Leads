@@ -641,10 +641,12 @@ class ClerkScraper:
         log.info(f"[Clerk] page title: {await page.title()}")
         log.info(f"[Clerk] URL: {page.url}")
 
-        # Run per-doc-type searches
+        # Strategy: search by Document Type (plain text input, no date picker needed).
+        # AVA returns all records for each doc type; we filter by date in Python.
+        # This avoids the Angular Material datepicker issue entirely.
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                await self._search_doc_types(page)
+                await self._search_by_doc_type_field(page)
                 break
             except Exception as exc:
                 log.warning(f"[Clerk] doc-type search attempt {attempt+1}: {exc}")
@@ -656,18 +658,117 @@ class ClerkScraper:
                 except Exception:
                     pass
 
-        # Also run a broad date-range search
-        for attempt in range(RETRY_ATTEMPTS):
+    async def _search_by_doc_type_field(self, page):
+        """
+        Search AVA by entering each lead doc type into the Document Type field.
+        Uses mat-input-2 (placeholder='Document Type') which is a plain text field
+        that works reliably with keyboard input, unlike the date pickers.
+        After each search, harvests all result pages then filters by date in Python.
+        """
+        log.info("[Clerk] searching by Document Type field…")
+
+        # Navigate to Search tab
+        await self._find_and_click_tab(page, [
+            "Search", "Quick Search", "Basic Search",
+        ])
+        await asyncio.sleep(1.5)
+
+        for code in AVA_SEARCH_CODES:
             try:
-                await self._search_broad(page)
-                break
-            except Exception as exc:
-                log.warning(f"[Clerk] broad search attempt {attempt+1}: {exc}")
-                await asyncio.sleep(RETRY_DELAY)
+                log.info(f"[Clerk] searching doc type: {code}")
+                await self._clear_form(page)
+
+                # Fill Document Type field — mat-input-2, placeholder='Document Type'
+                filled = False
+                for sel in [
+                    '#mat-input-2',
+                    'input[placeholder="Document Type"]',
+                    'input[id*="mat-input-2"]',
+                ]:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=3000):
+                            await self._angular_fill(page, el, code)
+                            log.info(f"[Clerk] doc type '{code}' → {sel}")
+                            filled = True
+                            break
+                    except Exception:
+                        pass
+
+                if not filled:
+                    log.warning(f"[Clerk] could not fill doc type for {code}")
+                    continue
+
+                await self._ss(page, f"form_{code}")
+
+                # Submit
+                submitted = False
+                for btn_label in ("Search", "Submit", "Find", "Go"):
+                    try:
+                        btn = page.get_by_role("button",
+                              name=re.compile(f"^{btn_label}$", re.I))
+                        if await btn.count():
+                            await btn.first.click()
+                            submitted = True
+                            log.info(f"[Clerk] submitted for {code}")
+                            break
+                    except Exception:
+                        pass
+                if not submitted:
+                    await page.keyboard.press("Enter")
+
+                await asyncio.sleep(4)
                 try:
-                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
-                    await self._dismiss(page)
-                    await asyncio.sleep(3)
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                except Exception:
+                    await asyncio.sleep(2)
+
+                # Log result state
+                try:
+                    title = await page.title()
+                    url   = page.url
+                    txt   = await page.evaluate("()=>document.body.innerText")
+                    snippet = txt.replace("\n"," ")[:400]
+                    log.info(f"[Clerk][{code}] result: url={url} text={snippet!r}")
+                    rows_cnt = await page.locator(
+                        "mat-row, tr[mat-row], [class*=mat-row]").count()
+                    log.info(f"[Clerk][{code}] mat-rows={rows_cnt}")
+                except Exception:
+                    pass
+
+                await self._harvest(page, label=code)
+
+                # Go back to search form
+                try:
+                    back = page.locator("button:has-text('BACK'), a:has-text('BACK'), "
+                                        "[aria-label='Back']").first
+                    if await back.is_visible(timeout=2000):
+                        await back.click()
+                        await asyncio.sleep(1.5)
+                    else:
+                        await page.goto(CLERK_AVA_URL,
+                                        wait_until="domcontentloaded", timeout=30_000)
+                        await asyncio.sleep(2)
+                        await self._find_and_click_tab(page, ["Search","Quick Search"])
+                        await asyncio.sleep(1)
+                except Exception:
+                    try:
+                        await page.goto(CLERK_AVA_URL,
+                                        wait_until="domcontentloaded", timeout=30_000)
+                        await asyncio.sleep(2)
+                        await self._find_and_click_tab(page, ["Search","Quick Search"])
+                        await asyncio.sleep(1)
+                    except Exception:
+                        pass
+
+            except Exception as exc:
+                log.warning(f"[Clerk] search for {code} failed: {exc}")
+                try:
+                    await page.goto(CLERK_AVA_URL,
+                                    wait_until="domcontentloaded", timeout=30_000)
+                    await asyncio.sleep(2)
+                    await self._find_and_click_tab(page, ["Search","Quick Search"])
+                    await asyncio.sleep(1)
                 except Exception:
                     pass
 
@@ -709,14 +810,8 @@ class ClerkScraper:
         return False
 
     async def _search_doc_types(self, page):
-        log.info("[Clerk] starting per-doc-type search…")
-        tab_found = await self._find_and_click_tab(page, [
-            "Document Type", "Doc Type", "Instrument Type",
-            "Type Search", "Advanced Search", "Advanced",
-        ])
-        if not tab_found:
-            log.info("[Clerk] no doc-type tab – skipping targeted search")
-            return
+        log.info("[Clerk] _search_doc_types: replaced by _search_by_doc_type_field")
+        return  # no-op
         await self._ss(page, "02_doctype_tab")
 
         for code in AVA_SEARCH_CODES:
@@ -1332,6 +1427,17 @@ class ClerkScraper:
         key = rec.get("doc_num", "") or str(rec)[:80]
         if key in self._seen:
             return False
+        # Filter by look-back period (since AVA now returns all dates)
+        filed = rec.get("filed", "")
+        if filed:
+            try:
+                from datetime import datetime, timedelta
+                filed_dt = datetime.strptime(filed, "%Y-%m-%d")
+                cutoff   = datetime.now() - timedelta(days=LOOK_BACK_DAYS)
+                if filed_dt < cutoff:
+                    return False
+            except Exception:
+                pass  # if date parse fails, include the record
         return True
 
     async def _next_page(self, page) -> bool:
