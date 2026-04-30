@@ -1133,68 +1133,144 @@ class ClerkScraper:
             log.warning(f"[Clerk] JS extraction failed: {exc}")
             return []
 
+    # Known multi-word Texas cities for address parsing
+    _TX_CITIES = [
+        "TEXAS CITY", "LEAGUE CITY", "SANTA FE", "LA MARQUE", "CLEAR LAKE",
+        "CRYSTAL BEACH", "PORT BOLIVAR", "JAMAICA BEACH", "BOLIVAR PENINSULA",
+        "BAYOU VISTA", "TIKI ISLAND", "WEST GALVESTON",
+    ]
+
+    @classmethod
+    def _split_tx_addr(cls, full: str) -> tuple[str, str, str, str]:
+        """
+        Split 'STREET CITY TX ZIP' into (street, city, state, zip).
+        Handles multi-word TX cities like TEXAS CITY, LEAGUE CITY.
+        """
+        import re as _re
+        m = _re.search(r"(.+?)\s+TX\s+(\d{5}(?:-\d{4})?)", full, _re.I)
+        if not m:
+            return full.strip(), "", "TX", ""
+        street_city = m.group(1).strip()
+        zipcode     = m.group(2)
+
+        city = ""
+        street = street_city
+        for mc in cls._TX_CITIES:
+            if street_city.upper().endswith(mc):
+                city   = mc.title()
+                street = street_city[:-len(mc)].strip()
+                break
+        if not city:
+            parts = street_city.rsplit(None, 1)
+            if len(parts) == 2:
+                street, city = parts[0], parts[1].title()
+
+        return street.strip(), city.strip(), "TX", zipcode
+
     def _parse_ava_text(self, text: str, url: str) -> list[dict]:
         """
-        Parse AVA results text.
-        Format (confirmed from CI log 2026-04-29):
-          Results: N
-          Document No  Document Type  Recorded Date  Party1  Party2  Legals
-          2026019373  CERTIFIED COPY  4/28/2026 4:32:41 PM  UNOFFICIAL
-          [detail block with same doc num]
-          2026019372  RELEASE  4/28/2026 4:26:13 PM  UNOFFICIAL
-          ...
+        Parse AVA results text.  Uses match-position windowing (not split)
+        to avoid splitting 10-digit doc numbers.
+
+        Confirmed AVA format (2026-04-30 CI log):
+          DOC_NUM  DOC_TYPE  DATE TIME  PARTY1  [PARTY2]
+          DOC_NUM  DATE TIME  DOC_TYPE  Ref No:...  Page Count:N
+          Parties  Party 1: NAME  Party 2: NAME
+          Legals   STREET CITY TX ZIP  SUBDIVISION  L: LOT
         """
         records = []
-        seen_in_text: set[str] = set()
+        seen: set[str] = set()
 
-        # Match doc number: 10-13 digit number at start of a token group
-        # Followed by doc type words, then a date
-        # Pattern: DOCNUM  DOC_TYPE_WORDS  MM/DD/YYYY  HH:MM:SS AM/PM  [PARTY]
-        pattern = re.compile(
-            r"(\d{7,13})"                       # doc number
-            r"\s+"
-            r"([A-Z][A-Z /&\-,]{2,50}?)"        # doc type (uppercase words)
-            r"\s+"
-            r"(\d{1,2}/\d{1,2}/\d{4})"          # date MM/DD/YYYY
-            r"(?:\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)?"  # optional time
-            r"(?:\s+([A-Z][A-Z .,&'-]{2,60}))?",  # optional party1
+        # Primary: doc_num (not preceded by digit) + doc_type + date
+        primary = re.compile(
+            r"(?<!\d)(\d{7,13})"
+            r"\s+([A-Z][A-Z /&\-,]{2,60}?)"
+            r"\s+(\d{1,2}/\d{1,2}/\d{4})",
+            re.MULTILINE
+        )
+        # TX address: "12531 WEST VENTURA DRIVE GALVESTON TX 77554"
+        addr_pat = re.compile(
+            r"(\d{1,6}(?:\s+\S+){1,8})\s+TX\s+(\d{5}(?:-\d{4})?)",
+            re.IGNORECASE
+        )
+        party1_pat = re.compile(
+            r"Party\s*1:\s*([A-Z][A-Z .,&'\-]{2,60}?)(?=\s+Party|\s+Legal|\s*$)",
+            re.MULTILINE
+        )
+        party2_pat = re.compile(
+            r"Party\s*2:\s*([A-Z][A-Z .,&'\-]{2,60}?)(?=\s+Legal|\s*$)",
             re.MULTILINE
         )
 
-        for m in pattern.finditer(text):
-            doc_num  = m.group(1).strip()
-            doc_type = m.group(2).strip().rstrip(",").strip()
+        all_matches = list(primary.finditer(text))
+        for i, m in enumerate(all_matches):
+            doc_num  = m.group(1)
+            doc_type = m.group(2).strip().rstrip(",")
             filed    = normalize_date(m.group(3))
-            party1   = (m.group(4) or "").strip().rstrip("Page").strip()
 
-            # Skip duplicate doc numbers (detail block appears twice in text)
-            if doc_num in seen_in_text:
-                continue
-            seen_in_text.add(doc_num)
-
-            # Skip obvious non-document tokens
             if len(doc_num) < 7:
                 continue
-            if doc_type.upper() in ("DOCUMENT NO", "DOC", "NUMBER", "RESULTS"):
+            if doc_type.upper() in ("DOCUMENT NO","DOC","NUMBER","RESULTS","BACK"):
                 continue
+            if doc_num in seen:
+                continue
+            seen.add(doc_num)
 
-            # Build direct URL to this document
-            direct_url = f"https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/{doc_num}"
+            # Context window: from this match to the next unique doc number
+            ctx_end = all_matches[i+1].start() if i+1 < len(all_matches) else len(text)
+            chunk   = text[m.start():ctx_end]
+
+            # Parties
+            p1 = party1_pat.search(chunk)
+            p2 = party2_pat.search(chunk)
+            owner   = p1.group(1).strip() if p1 else ""
+            grantee = p2.group(1).strip() if p2 else ""
+
+            # Fallback owner from text immediately after date
+            if not owner:
+                after = chunk[m.end():m.end() + 80].strip()
+                nm = re.match(r"([A-Z][A-Z .,&'\-]{4,50})", after)
+                if nm:
+                    cand = nm.group(1).strip()
+                    if cand.upper() not in ("UNOFFICIAL", "PAGE", "PARTIES",
+                                            "LEGALS", "REF NO", "ASSOCIATED"):
+                        owner = cand
+
+            # Property address from Legals section
+            prop_addr = prop_city = prop_zip = ""
+            am = addr_pat.search(chunk)
+            if am:
+                street, city, _, zipcode = self._split_tx_addr(
+                    am.group(1) + " TX " + am.group(2)
+                )
+                prop_addr = street
+                prop_city = city
+                prop_zip  = zipcode
+
+            direct_url = (
+                f"https://ava.fidlar.com/TXGalveston/AvaWeb/"
+                f"#/searchresults/{doc_num}"
+            )
 
             records.append({
-                "doc_num":   doc_num,
-                "raw_type":  doc_type,
-                "filed":     filed,
-                "owner":     party1,
-                "grantee":   "",
-                "legal":     "",
-                "amount":    None,
-                "clerk_url": direct_url,
+                "doc_num":     doc_num,
+                "raw_type":    doc_type,
+                "filed":       filed,
+                "owner":       owner,
+                "grantee":     grantee,
+                "legal":       "",
+                "amount":      None,
+                "clerk_url":   direct_url,
+                "_prop_addr":  prop_addr,
+                "_prop_city":  prop_city,
+                "_prop_state": "TX" if prop_addr else "",
+                "_prop_zip":   prop_zip,
             })
 
         log.info(f"[Clerk] _parse_ava_text: {len(records)} records from "
                  f"{len(text)} chars of text")
         return records
+
 
     async def _harvest(self, page, label: str = ""):
         p_num = 0
@@ -1502,6 +1578,12 @@ def enrich_records(raw_records: list[dict], parcel_index: ParcelIndex) -> list[d
         try:
             owner  = raw.get("owner", "")
             parcel = parcel_index.lookup(owner) if owner else {}
+            # Property address: prefer AVA-extracted situs, fall back to CAD
+            ava_prop_addr  = raw.get("_prop_addr", "")
+            ava_prop_city  = raw.get("_prop_city", "")
+            ava_prop_state = raw.get("_prop_state", "")
+            ava_prop_zip   = raw.get("_prop_zip", "")
+
             rec: dict[str, Any] = {
                 "doc_num":      raw.get("doc_num", ""),
                 "doc_type":     raw.get("raw_type", ""),
@@ -1512,10 +1594,10 @@ def enrich_records(raw_records: list[dict], parcel_index: ParcelIndex) -> list[d
                 "grantee":      raw.get("grantee", ""),
                 "amount":       raw.get("amount"),
                 "legal":        raw.get("legal", ""),
-                "prop_address": parcel.get("prop_address", ""),
-                "prop_city":    parcel.get("prop_city", ""),
-                "prop_state":   parcel.get("prop_state", "TX"),
-                "prop_zip":     parcel.get("prop_zip", ""),
+                "prop_address": ava_prop_addr  or parcel.get("prop_address", ""),
+                "prop_city":    ava_prop_city  or parcel.get("prop_city", ""),
+                "prop_state":   ava_prop_state or parcel.get("prop_state", "TX"),
+                "prop_zip":     ava_prop_zip   or parcel.get("prop_zip", ""),
                 "mail_address": parcel.get("mail_address", ""),
                 "mail_city":    parcel.get("mail_city", ""),
                 "mail_state":   parcel.get("mail_state", "TX"),
