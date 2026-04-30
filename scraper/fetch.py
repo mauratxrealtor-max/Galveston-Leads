@@ -398,15 +398,27 @@ class ParcelIndex:
         site_zip   = self._get(row, "SITUS_ZIP",   "SITE_ZIP",  "SITEZIP",
                                     "PROP_ZIP",    "ZIP5",      "ZIP")
 
-        mail_addr  = self._get(row,
+        mail_line1 = self._get(row,
             "PY_ADDR_LINE1",                            # APPRAISAL_INFO confirmed
             "MAIL_ADDR1", "MAILADR1", "ADDR_1",
             "MAIL_ADDRESS", "MAILING_ADDRESS", "MAIL_STR", "MAIL_ADDR",
             "ADDR1", "ADDRESS1")
-        # Append line 2 if present
-        mail_addr2 = self._get(row, "PY_ADDR_LINE2", "MAIL_ADDR2", "ADDR_2", "ADDR2")
-        if mail_addr2 and mail_addr2 not in mail_addr:
-            mail_addr = (mail_addr + " " + mail_addr2).strip()
+        mail_line2 = self._get(row, "PY_ADDR_LINE2", "MAIL_ADDR2", "ADDR_2", "ADDR2")
+        mail_line3 = self._get(row, "PY_ADDR_LINE3", "MAIL_ADDR3", "ADDR_3", "ADDR3")
+        # Use first non-blank line as primary address
+        if mail_line1:
+            mail_addr = mail_line1
+            # Append line 2 if it looks like a suite/unit continuation
+            if mail_line2 and mail_line2 not in mail_line1:
+                mail_addr = mail_line1 + ", " + mail_line2
+        elif mail_line2:
+            mail_addr = mail_line2  # line 1 blank, use line 2
+            if mail_line3 and mail_line3 not in mail_line2:
+                mail_addr = mail_line2 + ", " + mail_line3
+        elif mail_line3:
+            mail_addr = mail_line3
+        else:
+            mail_addr = ""
         mail_city  = self._get(row, "PY_ADDR_CITY",  "MAIL_CITY", "MAILCITY", "CITY")
         mail_state = self._get(row, "PY_ADDR_STATE", "MAIL_STATE","MAILSTATE","STATE") or "TX"
         mail_zip   = self._get(row, "PY_ADDR_ZIP",   "MAIL_ZIP",  "MAILZIP",  "ZIP", "ZIP5")
@@ -641,116 +653,258 @@ class ClerkScraper:
         log.info(f"[Clerk] page title: {await page.title()}")
         log.info(f"[Clerk] URL: {page.url}")
 
-        # Step 1: Broad date-range search (PROVEN to work — dates only, no doc type)
-        # Returns up to 300 records across all doc types.
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                await self._search_broad_with_dates(page)
-                break
-            except Exception as exc:
-                log.warning(f"[Clerk] broad search attempt {attempt+1}: {exc}")
-                await asyncio.sleep(RETRY_DELAY)
+        # AVA caps results at 300 records per search.
+        # Strategy: split the 90-day window into 30-day chunks to get full coverage.
+        # Each chunk gets up to 300 records = up to ~900 records total.
+        now        = datetime.now()
+        chunk_days = 30
+        chunks: list[tuple[str,str]] = []
+        cursor = now - timedelta(days=LOOK_BACK_DAYS)
+        while cursor < now:
+            chunk_end = min(cursor + timedelta(days=chunk_days), now)
+            chunks.append((
+                cursor.strftime("%m/%d/%Y"),
+                chunk_end.strftime("%m/%d/%Y"),
+            ))
+            cursor = chunk_end + timedelta(days=1)
+
+        log.info(f"[Clerk] searching {len(chunks)} date windows of ~{chunk_days} days each")
+
+        for i, (d_from, d_to) in enumerate(chunks):
+            log.info(f"[Clerk] window {i+1}/{len(chunks)}: {d_from} → {d_to}")
+            for attempt in range(RETRY_ATTEMPTS):
                 try:
-                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
-                    await self._dismiss(page)
-                    await asyncio.sleep(3)
-                except Exception:
-                    pass
-
-        # Step 2: Per-doc-type searches (dates + doc type) to capture
-        # records beyond the 300-result cap and ensure full coverage.
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                await self._search_each_doc_type_with_dates(page)
-                break
-            except Exception as exc:
-                log.warning(f"[Clerk] doc-type search attempt {attempt+1}: {exc}")
-                await asyncio.sleep(RETRY_DELAY)
-                try:
-                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
-                    await self._dismiss(page)
-                    await asyncio.sleep(3)
-                except Exception:
-                    pass
-
-    async def _search_broad_with_dates(self, page):
-        """
-        Broad date-range search — PROVEN WORKING in CI run 2026-04-30 12:19.
-        Fills mat-input-0 (date_from) and mat-input-1 (date_to) via _angular_fill,
-        leaves Document Type empty. Returns up to 300 mixed records.
-        """
-        log.info("[Clerk] running broad date-range search (proven approach)…")
-
-        await self._find_and_click_tab(page, ["Search", "Quick Search"])
-        await asyncio.sleep(1)
-        await self._clear_form(page)
-
-        # Wait for mat-input-0 to be present (confirmed in working run)
-        try:
-            await page.wait_for_selector('#mat-input-0', state='visible', timeout=10_000)
-        except Exception:
-            pass
-        await asyncio.sleep(0.5)
-
-        # Fill date_from (mat-input-0) — PROVEN WORKING
-        filled_from = False
-        el = page.locator('#mat-input-0').first
-        if await el.is_visible(timeout=3000):
-            await self._angular_fill(page, el, self.date_from)
-            log.info(f"[Clerk] broad: date_from → {self.date_from}")
-            filled_from = True
-
-        if not filled_from:
-            date_inputs = page.locator('input[placeholder="MM/DD/YYYY"]')
-            if await date_inputs.count() >= 1:
-                await self._angular_fill(page, date_inputs.nth(0), self.date_from)
-                log.info(f"[Clerk] broad: date_from via placeholder → {self.date_from}")
-
-        # Fill date_to (mat-input-1) — PROVEN WORKING
-        filled_to = False
-        el = page.locator('#mat-input-1').first
-        if await el.is_visible(timeout=3000):
-            await self._angular_fill(page, el, self.date_to)
-            log.info(f"[Clerk] broad: date_to → {self.date_to}")
-            filled_to = True
-
-        if not filled_to:
-            date_inputs = page.locator('input[placeholder="MM/DD/YYYY"]')
-            if await date_inputs.count() >= 2:
-                await self._angular_fill(page, date_inputs.nth(1), self.date_to)
-                log.info(f"[Clerk] broad: date_to via placeholder → {self.date_to}")
-
-        await self._ss(page, "broad_form_filled")
-
-        # Submit
-        for btn_label in ("Search", "Submit", "Find"):
-            try:
-                btn = page.get_by_role("button",
-                      name=re.compile(f"^{btn_label}$", re.I))
-                if await btn.count():
-                    await btn.first.click()
-                    log.info(f"[Clerk] broad: submitted via '{btn_label}'")
+                    await self._search_window(page, d_from, d_to, label=f"W{i+1}")
                     break
+                except Exception as exc:
+                    log.warning(f"[Clerk] window {i+1} attempt {attempt+1}: {exc}")
+                    await asyncio.sleep(RETRY_DELAY)
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                        await self._dismiss(page)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        pass
+
+    async def _search_window(self, page, date_from: str, date_to: str, label: str = ""):
+        """
+        Search AVA for a specific date window using the proven _angular_fill approach.
+        Tries multiple fill strategies on reset detection.
+        """
+        for strategy in range(4):
+            await self._find_and_click_tab(page, ["Search","Quick Search"])
+            await asyncio.sleep(1.5)
+            await self._clear_form(page)
+            try:
+                await page.wait_for_selector("#mat-input-0", state="visible", timeout=8000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+            await self._fill_date_input(page, "#mat-input-0", date_from, strategy=strategy)
+            await asyncio.sleep(0.5)
+            await self._fill_date_input(page, "#mat-input-1", date_to,   strategy=strategy)
+
+            # Verify values
+            try:
+                v0 = await page.locator("#mat-input-0").first.input_value()
+                v1 = await page.locator("#mat-input-1").first.input_value()
+                log.info(f"[Clerk][{label}] s{strategy}: from={v0!r} to={v1!r}")
             except Exception:
                 pass
 
-        await asyncio.sleep(4)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=15_000)
-        except Exception:
-            await asyncio.sleep(2)
+            # Submit
+            for btn_label in ("Search", "Submit", "Find"):
+                try:
+                    btn = page.get_by_role("button",
+                          name=re.compile(f"^{btn_label}$", re.I))
+                    if await btn.count():
+                        await btn.first.click()
+                        break
+                except Exception:
+                    pass
 
-        await self._log_result_state(page, "BROAD")
-        await self._harvest(page, label="BROAD")
+            await asyncio.sleep(6)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                await asyncio.sleep(3)
+
+            url = page.url
+            log.info(f"[Clerk][{label}] s{strategy}: url={url}")
+
+            if "searchresults" in url:
+                await self._log_result_state(page, label)
+                await self._harvest(page, label=label)
+                return
+
+            log.warning(f"[Clerk][{label}] strategy {strategy} got reset")
+            await asyncio.sleep(3)
+
+        log.warning(f"[Clerk][{label}] all strategies failed for {date_from}→{date_to}")
+
+    async def _search_broad_with_dates(self, page):
+        """
+        Broad date-range search. Tries multiple strategies to bind dates to Angular.
+        On reset detection, tries alternative approach.
+        """
+        log.info("[Clerk] running broad date-range search…")
+
+        # Set up XHR interception to capture API calls
+        api_calls: list[str] = []
+        async def capture_xhr(req):
+            if req.resource_type in ("xhr","fetch") and "fidlar" in req.url:
+                api_calls.append(f"{req.method} {req.url[:120]}")
+        page.on("request", capture_xhr)
+
+        for strategy in range(4):  # try up to 4 strategies
+            await self._find_and_click_tab(page, ["Search","Quick Search"])
+            await asyncio.sleep(1.5)
+            await self._clear_form(page)
+            try:
+                await page.wait_for_selector("#mat-input-0", state="visible", timeout=8000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+            if strategy == 0:
+                # Strategy 0: _angular_fill (click+Ctrl+A+Delete+type+Tab)
+                log.info("[Clerk] date strategy 0: angular_fill")
+                await self._fill_date_input(page, "#mat-input-0", self.date_from, strategy=0)
+                await asyncio.sleep(0.5)
+                await self._fill_date_input(page, "#mat-input-1", self.date_to,   strategy=0)
+
+            elif strategy == 1:
+                # Strategy 1: click → type (no Ctrl+A, slower)
+                log.info("[Clerk] date strategy 1: slow type")
+                await self._fill_date_input(page, "#mat-input-0", self.date_from, strategy=1)
+                await asyncio.sleep(0.5)
+                await self._fill_date_input(page, "#mat-input-1", self.date_to,   strategy=1)
+
+            elif strategy == 2:
+                # Strategy 2: JavaScript direct property set + dispatchEvent
+                log.info("[Clerk] date strategy 2: JS property set")
+                await self._fill_date_input(page, "#mat-input-0", self.date_from, strategy=2)
+                await asyncio.sleep(0.5)
+                await self._fill_date_input(page, "#mat-input-1", self.date_to,   strategy=2)
+
+            elif strategy == 3:
+                # Strategy 3: fill() + eval dispatch (last resort)
+                log.info("[Clerk] date strategy 3: fill + dispatch")
+                await self._fill_date_input(page, "#mat-input-0", self.date_from, strategy=3)
+                await asyncio.sleep(0.5)
+                await self._fill_date_input(page, "#mat-input-1", self.date_to,   strategy=3)
+
+            # Verify values were accepted
+            try:
+                v0 = await page.locator("#mat-input-0").first.input_value()
+                v1 = await page.locator("#mat-input-1").first.input_value()
+                log.info(f"[Clerk] strategy {strategy}: from={v0!r} to={v1!r}")
+            except Exception:
+                pass
+
+            await self._ss(page, f"broad_s{strategy}_filled")
+
+            # Submit
+            for btn_label in ("Search", "Submit", "Find"):
+                try:
+                    btn = page.get_by_role("button",
+                          name=re.compile(f"^{btn_label}$", re.I))
+                    if await btn.count():
+                        await btn.first.click()
+                        log.info(f"[Clerk] strategy {strategy}: submitted")
+                        break
+                except Exception:
+                    pass
+
+            await asyncio.sleep(6)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                await asyncio.sleep(3)
+
+            url = page.url
+            log.info(f"[Clerk] strategy {strategy}: url={url}")
+            if api_calls:
+                log.info(f"[Clerk] XHR captured: {api_calls[-3:]}")
+
+            if "searchresults" in url:
+                log.info(f"[Clerk] strategy {strategy} SUCCESS")
+                await self._log_result_state(page, "BROAD")
+                await self._harvest(page, label="BROAD")
+                return
+
+            log.warning(f"[Clerk] strategy {strategy} got reset — trying next")
+            await asyncio.sleep(3)
+
+        log.warning("[Clerk] all broad search strategies failed")
+
+    async def _fill_date_input(self, page, selector: str, value: str, strategy: int):
+        """Fill an Angular Material date input with the given value using the specified strategy."""
+        try:
+            el = page.locator(selector).first
+            if not await el.is_visible(timeout=3000):
+                return
+
+            if strategy == 0:
+                # angular_fill: click + Ctrl+A + Delete + type + Tab
+                await el.click()
+                await asyncio.sleep(0.2)
+                await el.press("Control+a")
+                await el.press("Delete")
+                await el.type(value, delay=50)
+                await asyncio.sleep(0.3)
+                await el.press("Tab")
+                await asyncio.sleep(0.3)
+
+            elif strategy == 1:
+                # Slow type without clear
+                await el.click()
+                await asyncio.sleep(0.5)
+                for ch in value:
+                    await page.keyboard.type(ch)
+                    await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+
+            elif strategy == 2:
+                # JS: React/Angular native setter
+                handle = await el.element_handle()
+                await page.evaluate("""(args) => {
+                    const [el, val] = args;
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value').set;
+                    nativeSetter.call(el, val);
+                    ['input','change','blur'].forEach(evt =>
+                        el.dispatchEvent(new Event(evt, {bubbles:true})));
+                }""", [handle, value])
+                await asyncio.sleep(0.5)
+                await el.press("Tab")
+
+            elif strategy == 3:
+                # fill() + manual dispatch
+                await el.fill(value)
+                await asyncio.sleep(0.3)
+                await page.evaluate(
+                    "(sel) => { const el = document.querySelector(sel); "
+                    "if(el){ el.dispatchEvent(new Event('input',{bubbles:true})); "
+                    "el.dispatchEvent(new Event('change',{bubbles:true})); }}",
+                    selector
+                )
+                await asyncio.sleep(0.3)
+                await el.press("Tab")
+
+        except Exception as exc:
+            log.warning(f"[Clerk] _fill_date_input({selector}, strategy={strategy}): {exc}")
 
     async def _search_each_doc_type_with_dates(self, page):
-        """
-        Per-doc-type searches with dates filled — for full coverage beyond 300-cap.
-        Fills all three fields: date_from + date_to + doc_type.
-        """
-        log.info("[Clerk] running per-doc-type searches with dates…")
+        """Kept for backwards compatibility — replaced by windowed search in _run."""
+        return  # no-op: windowed date search in _run provides better coverage
 
-        for code in AVA_SEARCH_CODES:
+        for code in AVA_SEARCH_CODES:  # noqa: unreachable
             try:
                 await self._find_and_click_tab(page, ["Search","Quick Search"])
                 await asyncio.sleep(1)
@@ -818,6 +972,141 @@ class ClerkScraper:
             log.info(f"[Clerk][{label}] mat-rows={rows}")
         except Exception as e:
             log.warning(f"[Clerk][{label}] log_result_state failed: {e}")
+
+    async def _search_broad_with_retry(self, page) -> bool:
+        """
+        Perform a broad date-range search. Returns True if results page was reached.
+        Tries multiple techniques to fill Angular Material date pickers.
+        """
+        log.info("[Clerk] attempting broad date-range search…")
+
+        # Navigate to search tab
+        await self._find_and_click_tab(page, ["Search","Quick Search","Basic Search"])
+        await asyncio.sleep(2)
+
+        # Wait for the date inputs to appear
+        try:
+            await page.wait_for_selector("#mat-input-0", state="visible", timeout=8000)
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+        # Log what's in the form before filling
+        await self._log_inputs(page)
+
+        # Try multiple date-fill strategies in sequence
+        date_from = self.date_from  # "01/30/2026"
+        date_to   = self.date_to    # "04/30/2026"
+
+        # Strategy A: click label → type (original approach that worked 2026-04-30 12:19)
+        filled = await self._try_fill_dates_strategy_a(page, date_from, date_to)
+        log.info(f"[Clerk] date fill strategy A: {'OK' if filled else 'FAILED'}")
+
+        if not filled:
+            # Strategy B: use Tab navigation to reach date fields by position
+            filled = await self._try_fill_dates_strategy_b(page, date_from, date_to)
+            log.info(f"[Clerk] date fill strategy B: {'OK' if filled else 'FAILED'}")
+
+        # Submit and check result
+        await self._ss(page, "broad_prefill")
+        for btn_label in ("Search", "Submit", "Find"):
+            try:
+                btn = page.get_by_role("button", name=re.compile(f"^{btn_label}$", re.I))
+                if await btn.count():
+                    await btn.first.click()
+                    log.info(f"[Clerk] broad search submitted")
+                    break
+            except Exception:
+                pass
+
+        await asyncio.sleep(5)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            await asyncio.sleep(3)
+
+        current_url = page.url
+        log.info(f"[Clerk] broad search result URL: {current_url}")
+
+        if "searchresults" in current_url:
+            # Success! Harvest results
+            txt = await page.evaluate("()=>document.body.innerText")
+            log.info(f"[Clerk] results text: {txt.replace(chr(10),' ')[:600]!r}")
+            mat_rows = await page.locator("mat-row, tr[mat-row], [class*=mat-row]").count()
+            log.info(f"[Clerk] mat-rows={mat_rows}")
+            await self._ss(page, "broad_results")
+            await self._harvest(page, label="BROAD")
+            return True
+
+        # Still on search page - log details for debugging
+        txt = await page.evaluate("()=>document.body.innerText")
+        snippet = txt.replace("\n"," ")[:400]
+        log.info(f"[Clerk] broad search reset. page text: {snippet!r}")
+        return False
+
+    async def _try_fill_dates_strategy_a(self, page, date_from: str, date_to: str) -> bool:
+        """Strategy A: direct angular_fill on mat-input-0 and mat-input-1."""
+        try:
+            el0 = page.locator("#mat-input-0").first
+            if await el0.is_visible(timeout=3000):
+                await self._angular_fill(page, el0, date_from)
+                log.info(f"[Clerk] A: date_from={date_from}")
+
+            el1 = page.locator("#mat-input-1").first
+            if await el1.is_visible(timeout=3000):
+                await self._angular_fill(page, el1, date_to)
+                log.info(f"[Clerk] A: date_to={date_to}")
+
+            # Verify values stuck
+            val0 = await page.locator("#mat-input-0").first.input_value()
+            val1 = await page.locator("#mat-input-1").first.input_value()
+            log.info(f"[Clerk] A verify: from={val0!r} to={val1!r}")
+            return bool(val0 and val1)
+        except Exception as exc:
+            log.warning(f"[Clerk] strategy A failed: {exc}")
+            return False
+
+    async def _try_fill_dates_strategy_b(self, page, date_from: str, date_to: str) -> bool:
+        """
+        Strategy B: click each date field, clear it, type value slowly,
+        then press Tab twice (once to move to time, once to confirm).
+        Angular Material datepicker sometimes needs the value confirmed via Enter.
+        """
+        try:
+            # Click the first date field
+            el0 = page.locator("#mat-input-0").first
+            await el0.click()
+            await asyncio.sleep(0.5)
+            # Select all and delete
+            await page.keyboard.press("Control+a")
+            await asyncio.sleep(0.2)
+            await page.keyboard.type(date_from, delay=80)
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")  # confirm date selection
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Escape")  # close calendar if opened
+            await asyncio.sleep(0.3)
+
+            # Click the second date field
+            el1 = page.locator("#mat-input-1").first
+            await el1.click()
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Control+a")
+            await asyncio.sleep(0.2)
+            await page.keyboard.type(date_to, delay=80)
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+
+            val0 = await el0.input_value()
+            val1 = await el1.input_value()
+            log.info(f"[Clerk] B verify: from={val0!r} to={val1!r}")
+            return bool(val0 and val1)
+        except Exception as exc:
+            log.warning(f"[Clerk] strategy B failed: {exc}")
+            return False
 
     async def _search_by_doc_type_field(self, page):
         """
