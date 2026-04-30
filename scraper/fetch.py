@@ -369,30 +369,47 @@ class ParcelIndex:
 
     def _index_row(self, row: dict):
         owner = self._get(row,
+            "PY_OWNER_NAME",                            # APPRAISAL_INFO confirmed
+            "APPR_OWNER_NAME",                          # APPRAISAL_INFO alt
             "OWNER_NAME", "OWNERNAME", "OWNER", "OWN1", "OWNER1", "PROP_OWNER")
         if not owner:
             return
 
         site_num   = self._get(row, "SITUS_NUM",    "SITE_NUM",   "STR_NUM")
         site_str   = self._get(row, "SITUS_STREET", "STR_NAME",   "STREET_NAME", "SITUS_STR")
-        site_full  = self._get(row, "SITUS",        "PROP_ADDR",  "SITE_ADDR",
-                                    "SITEADDR",      "ADDRESS",    "PROP_ADDRESS",
-                                    "SITE_ADDRESS",  "SITUS_ADDRESS")
-        if not site_full and (site_num or site_str):
-            site_full = (site_num + " " + site_str).strip()
+        # Build situs/property address from components (APPRAISAL_INFO format)
+        situs_prefx  = self._get(row, "SITUS_PREFX")
+        situs_street = self._get(row, "SITUS_STREET")
+        situs_suffix = self._get(row, "SITUS_SUFFIX")
+        situs_num2   = self._get(row, "SITUS_NUM", "SITUS_NUM2")
+        site_full    = self._get(row, "SITUS", "PROP_ADDR", "SITE_ADDR",
+                                      "SITEADDR", "ADDRESS", "PROP_ADDRESS",
+                                      "SITE_ADDRESS", "SITUS_ADDRESS")
+        if not site_full:
+            # Assemble from parts
+            parts = [p for p in [site_num, situs_prefx, situs_street, situs_suffix] if p]
+            if not parts:
+                parts = [p for p in [situs_num2, situs_prefx, situs_street] if p]
+            site_full = " ".join(parts).strip()
 
-        site_city  = self._get(row, "SITUS_CITY",  "SITE_CITY",  "SITECITY",
-                                    "PROP_CITY",    "CITY_NAME",  "CITY")
-        site_state = self._get(row, "SITUS_STATE", "SITE_STATE", "STATE") or "TX"
-        site_zip   = self._get(row, "SITUS_ZIP",   "SITE_ZIP",   "SITEZIP",
-                                    "PROP_ZIP",     "ZIP5",       "ZIP")
+        site_city  = self._get(row, "SITUS_CITY",  "SITE_CITY", "SITECITY",
+                                    "PROP_CITY",   "CITY_NAME", "CITY")
+        site_state = self._get(row, "SITUS_STATE", "SITE_STATE","STATE") or "TX"
+        site_zip   = self._get(row, "SITUS_ZIP",   "SITE_ZIP",  "SITEZIP",
+                                    "PROP_ZIP",    "ZIP5",      "ZIP")
 
-        mail_addr  = self._get(row, "MAIL_ADDR1",  "MAILADR1",   "ADDR_1",
-                                    "MAIL_ADDRESS", "MAILING_ADDRESS", "MAIL_STR",
-                                    "MAIL_ADDR",    "ADDR1",   "ADDRESS1")  # AGENT_OWNER uses ADDR1
-        mail_city  = self._get(row, "MAIL_CITY",   "MAILCITY",   "CITY",   "MAIL_CITY2")
-        mail_state = self._get(row, "MAIL_STATE",  "MAILSTATE",  "STATE")  or "TX"
-        mail_zip   = self._get(row, "MAIL_ZIP",    "MAILZIP",    "ZIP",    "ZIP5")
+        mail_addr  = self._get(row,
+            "PY_ADDR_LINE1",                            # APPRAISAL_INFO confirmed
+            "MAIL_ADDR1", "MAILADR1", "ADDR_1",
+            "MAIL_ADDRESS", "MAILING_ADDRESS", "MAIL_STR", "MAIL_ADDR",
+            "ADDR1", "ADDRESS1")
+        # Append line 2 if present
+        mail_addr2 = self._get(row, "PY_ADDR_LINE2", "MAIL_ADDR2", "ADDR_2", "ADDR2")
+        if mail_addr2 and mail_addr2 not in mail_addr:
+            mail_addr = (mail_addr + " " + mail_addr2).strip()
+        mail_city  = self._get(row, "PY_ADDR_CITY",  "MAIL_CITY", "MAILCITY", "CITY")
+        mail_state = self._get(row, "PY_ADDR_STATE", "MAIL_STATE","MAILSTATE","STATE") or "TX"
+        mail_zip   = self._get(row, "PY_ADDR_ZIP",   "MAIL_ZIP",  "MAILZIP",  "ZIP", "ZIP5")
 
         entry = dict(
             prop_address=site_full, prop_city=site_city,
@@ -420,6 +437,25 @@ class ParcelIndex:
             if k:
                 self._by_name[k] = entry
 
+    # ── confirmed column layouts from Appraisal_Export_Layout_-_8_0_30.xlsx ──
+    # All positions are 0-indexed (layout doc uses 1-indexed, we subtract 1)
+
+    # APPRAISAL_INFO.TXT - confirmed exact offsets
+    APPRAISAL_INFO_COLS = [
+        ("PROP_ID",        0,   12),
+        ("PY_OWNER_NAME",  608,  70),   # Property Year Owner Name  ← primary owner
+        ("PY_ADDR_LINE1",  693,  60),   # Mailing Address Line 1
+        ("PY_ADDR_LINE2",  753,  60),   # Mailing Address Line 2
+        ("PY_ADDR_CITY",   873,  50),   # Mailing City
+        ("PY_ADDR_STATE",  923,  50),   # Mailing State
+        ("PY_ADDR_ZIP",    978,   5),   # Mailing Zip (5-digit)
+        ("SITUS_PREFX",   1039,  10),   # Situs Street Prefix
+        ("SITUS_STREET",  1049,  50),   # Situs Street Name
+        ("SITUS_SUFFIX",  1099,  10),   # Situs Suffix
+        ("SITUS_CITY",    1109,  30),   # Situs City
+        ("SITUS_ZIP",     1139,  10),   # Situs Zip
+    ]
+
     def load(self):
         if self._loaded:
             return
@@ -443,129 +479,51 @@ class ParcelIndex:
 
             names = zf.namelist()
 
-            # ── Step A: Find and parse header files for column layouts ───────
-            header_map: dict[str, list[tuple[str, int, int]]] = {}
-            for n in names:
-                if "HEADER" in n.upper() and Path(n).suffix.upper() == ".TXT":
-                    hdata = zf.read(n)
-                    # Always log raw header content so we can see real column names
-                    log.info(f"[CAD] header raw ({n}, {len(hdata)}b): "
-                             f"{hdata.decode('latin-1','replace').strip()[:200]!r}")
-                    cols = self._parse_header_txt(hdata, n)
-                    if cols:
-                        # Map header to its data file by stripping "HEADER"
-                        base = n.upper().replace("_HEADER", "").replace("HEADER_", "")
-                        header_map[base] = cols
-                        header_map[Path(n).stem.upper()] = cols
-                        # Extra: also map with OWNER_AGENT ↔ AGENT_OWNER swapped
-                        swapped = base.replace("OWNER_AGENT", "AGENT_OWNER")                                      .replace("AGENT_OWNER", "OWNER_AGENT")
-                        header_map[swapped] = cols
-                        log.info(f"[CAD] header {n} → {len(cols)} columns: "
-                                 f"{[c[0] for c in cols[:8]]}")
-                    else:
-                        # Header didn't parse as positional – might be field-name-only
-                        # Treat as pipe-delimited field list (positional columns)
-                        field_names = [p.strip().upper()
-                                       for p in hdata.decode('latin-1','replace').split('|')
-                                       if p.strip()]
-                        if len(field_names) >= 3:
-                            log.info(f"[CAD] header fields only ({n}): {field_names}")
-                            # Store as field-name list for positional matching
-                            header_map[Path(n).stem.upper() + "_FIELDS"] = field_names
+            # ── Priority 1: APPRAISAL_INFO.TXT (confirmed layout) ────────────
+            appr_files = [n for n in names
+                          if "APPRAISAL_INFO" in n.upper()
+                          if Path(n).suffix.upper() == ".TXT"
+                          if "HEADER" not in n.upper()
+                          if zf.getinfo(n).file_size > 1_000_000]
 
-            # ── Step B: Target files in priority order ───────────────────────
-            # Priority 1: AGENT_OWNER (owner name + mailing address)
+            # ── Priority 2: AGENT_OWNER / OWNER_AGENT (dynamic scan) ─────────
             owner_files = sorted(
                 [n for n in names
-                 if ("AGENT_OWNER" in n.upper() or "OWNER_AGENT" in n.upper()
-                     or "OWNER" in n.upper())
+                 if ("AGENT_OWNER" in n.upper() or "OWNER_AGENT" in n.upper())
                  if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
-                 if zf.getinfo(n).file_size > 100_000
-                 if "HEADER" not in n.upper()],
-                key=lambda n: zf.getinfo(n).file_size, reverse=True
-            )
-            # Priority 2: APPRAISAL_INFO
-            info_files = [n for n in names
-                          if "APPRAISAL_INFO" in n.upper()
-                          if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
-                          if zf.getinfo(n).file_size > 1_000_000
-                          if "HEADER" not in n.upper()]
-            # Priority 3: other large files
-            big_files = sorted(
-                [n for n in names
-                 if Path(n).suffix.upper() in (".TXT", ".CSV", ".DBF")
-                 if zf.getinfo(n).file_size > 1_000_000
                  if "HEADER" not in n.upper()
-                 if "DETAIL" not in n.upper()
-                 if "IMPROVEMENT" not in n.upper()],
+                 if zf.getinfo(n).file_size > 100_000],
                 key=lambda n: zf.getinfo(n).file_size, reverse=True
             )
 
-            for candidate_list in (owner_files, info_files, big_files):
-                for name in candidate_list:
-                    sz = zf.getinfo(name).file_size
-                    log.info(f"[CAD] trying: {name} ({sz:,} bytes)")
-                    data_bytes = zf.read(name)
+            for name in (appr_files + owner_files):
+                sz = zf.getinfo(name).file_size
+                log.info(f"[CAD] trying: {name} ({sz:,} bytes)")
+                data_bytes = zf.read(name)
 
-                    # Find matching header layout
-                    cols = None
-                    name_upper = name.upper()
-                    name_stem  = Path(name).stem.upper()
-                    for hkey, hcols in header_map.items():
-                        if not isinstance(hcols, list) or not hcols:
-                            continue
-                        if not isinstance(hcols[0], tuple):
-                            continue  # field-name list, skip
-                        hkey_clean = hkey.replace("_HEADER","").replace("HEADER_","")
-                        # Flexible match: handle OWNER_AGENT <-> AGENT_OWNER swaps
-                        swapped_name = name_upper.replace("AGENT_OWNER","OWNER_AGENT")
-                        swapped_key  = hkey_clean.replace("OWNER_AGENT","AGENT_OWNER")
-                        if (hkey_clean in name_upper or name_upper in hkey_clean
-                                or name_stem in hkey or hkey in name_stem
-                                or swapped_name in hkey_clean
-                                or hkey_clean in swapped_name
-                                or swapped_key in name_upper):
-                            cols = hcols
-                            log.info(f"[CAD] matched header '{hkey}' to {name}: "
-                                     f"{[c[0] for c in cols[:8]]}")
-                            break
-
-                    # If no header found but file looks fixed-width, use known GCAD layouts
-                    sample = data_bytes[:4000]
-                    is_pipe = b"|" in sample and sample.count(b"|") > 5
-                    if not cols and not is_pipe:
-                        cols = self._guess_fixed_width_layout(name, data_bytes)
-                    elif cols:
-                        # Validate: if header-derived cols don't look right, fall back to guess
-                        test_rows = self._parse_fixed_width(data_bytes[:4000], name, cols)
-                        if test_rows:
-                            test_owner = self._get(test_rows[0],
-                                "OWNER_NAME","OWNERNAME","OWNER","OWN1","NAME")
-                            # Owner should look like a name, not a numeric ID
-                            if test_owner and re.match(r'^[\d\s]+$', test_owner.strip()):
-                                log.warning(f"[CAD] header layout gave numeric owner "
-                                            f"{test_owner!r} – falling back to guess")
-                                cols = self._guess_fixed_width_layout(name, data_bytes)
-
+                if "APPRAISAL_INFO" in name.upper():
+                    # Use confirmed layout, stream parse
+                    rows = self._parse_appraisal_info(data_bytes)
+                else:
+                    # Dynamic scan for AGENT_OWNER
+                    cols = self._guess_fixed_width_layout(name, data_bytes)
                     rows = self._auto_parse(data_bytes, name, cols)
-                    if rows:
-                        log.info(f"[CAD] sample keys: {list(rows[0].keys())[:16]}")
-                        # Validate we got useful data
-                        owner_col = self._get(rows[0],
-                            "OWNER_NAME","OWNERNAME","OWNER","OWN1","NAME")
-                        if owner_col or len(rows) > 100:
-                            log.info(f"[CAD] sample owner: {owner_col!r}")
-                            break
-                        else:
-                            log.warning(f"[CAD] {name}: no owner column found, trying next")
-                            rows = []
+
                 if rows:
-                    break
+                    owner_sample = self._get(rows[0],
+                        "PY_OWNER_NAME","OWNER_NAME","OWNER","OWN1")
+                    log.info(f"[CAD] sample keys: {list(rows[0].keys())[:10]}")
+                    log.info(f"[CAD] sample owner: {owner_sample!r}")
+                    # Validate owner looks like a name
+                    if owner_sample and not re.match(r"^[\d\s]+$", owner_sample.strip()):
+                        break
+                    else:
+                        log.warning(f"[CAD] {name}: owner looks numeric, trying next")
+                        rows = []
 
         except zipfile.BadZipFile:
             log.warning("[CAD] not a ZIP – trying raw parse")
-            name_str = url.split("/")[-1]
-            rows = self._auto_parse(raw, name_str)
+            rows = self._parse_appraisal_info(raw) or                    self._auto_parse(raw, url.split("/")[-1], None)
 
         log.info(f"[CAD] indexing {len(rows):,} rows…")
         for row in rows:
@@ -575,173 +533,46 @@ class ParcelIndex:
                 pass
         log.info(f"[CAD] index built: {len(self._by_name):,} name keys")
 
-    def _guess_fixed_width_layout(self, name: str,
-                                   data: bytes) -> list[tuple[str, int, int]] | None:
+    def _parse_appraisal_info(self, data: bytes) -> list[dict]:
         """
-        Guess fixed-width column layout.
-        1. Scan data bytes to find where owner names actually appear.
-        2. Fall back to known layouts if scan fails.
+        Stream-parse APPRAISAL_INFO.TXT using confirmed column offsets.
+        Reads line-by-line to handle the 2GB file without OOM.
+        Minimum record length needed: 1149 bytes (through SITUS_ZIP).
         """
-        import re as _re
-        name_upper = name.upper()
-        lines_raw  = data.split(b"\n")
-        data_lines = [l.rstrip(b"\r") for l in lines_raw if len(l.rstrip(b"\r")) > 200]
-        first_line = data_lines[0] if data_lines else lines_raw[0].rstrip(b"\r")
-        rec_len    = len(first_line)
-        log.info(f"[CAD] {name}: rec_len={rec_len}, scanning for name offset")
+        rows = []
+        cols = self.APPRAISAL_INFO_COLS
+        min_len = max(start + length for _, start, length in cols)
+        count = 0
+        blank_owner = 0
 
-        is_owner = "AGENT_OWNER" in name_upper or "OWNER_AGENT" in name_upper
-        is_appr  = "APPRAISAL_INFO" in name_upper
-
-        if is_owner or is_appr:
-            # ── Step 1: dynamic scan ────────────────────────────────────────
-            name_off = self._scan_name_offset(data_lines[:50], rec_len)
-            if name_off:
-                addr_off = self._scan_addr_offset(data_lines[:50], name_off, rec_len)
-                city_off = self._scan_city_offset(data_lines[:50],
-                                                  (addr_off or name_off+75), rec_len)
-                log.info(f"[CAD] scan: name_off={name_off} addr_off={addr_off} "
-                         f"city_off={city_off}")
-                if name_off and addr_off and city_off:
-                    cols = [
-                        ("PROP_ID",    0,          min(19, name_off)),
-                        ("OWNER_NAME", name_off,   addr_off - name_off),
-                        ("ADDR1",      addr_off,   min(75, city_off - addr_off)),
-                        ("CITY",       city_off,   50),
-                        ("STATE",      city_off+50, 2),
-                        ("ZIP",        city_off+52, 10),
-                    ]
-                    log.info(f"[CAD] dynamic layout: {[(c[0],c[1]) for c in cols]}")
-                    return cols
-
-            # ── Step 2: try candidate static offsets ─────────────────────
-            candidates = []
-            if is_owner:
-                # (name_off, addr_off, city_off, state_off, zip_off)
-                candidates = [
-                    (49, 169, 319, 369, 371),   # 1299-byte modern (OWNER_ID at 30)
-                    (30, 105, 255, 305, 307),   # ~320-byte standard
-                    (30,  75, 175, 225, 227),   # compact
-                    (40, 115, 230, 280, 282),   # variant
-                    (50, 170, 320, 370, 372),   # off-by-one modern
-                ]
-            else:  # APPRAISAL_INFO
-                candidates = [
-                    (547, 622, 697, 747, 749),
-                    (300, 375, 450, 500, 502),
-                ]
-
-            for n_off, a_off, c_off, s_off, z_off in candidates:
-                if n_off + 10 > rec_len:
-                    continue
-                sample = first_line[n_off:n_off+40].decode("latin-1","replace")
-                if _re.match(r"[A-Za-z]{2}", sample.strip()):
-                    log.info(f"[CAD] static candidate: name_off={n_off} "
-                             f"sample={sample.strip()[:25]!r}")
-                    w = min(75, a_off - n_off) if a_off > n_off else 75
-                    aw = min(75, c_off - a_off) if a_off + 5 < rec_len else 75
-                    return [
-                        ("PROP_ID",    0,     min(19, n_off)),
-                        ("OWNER_NAME", n_off, w),
-                        ("ADDR1",      a_off, aw),
-                        ("CITY",       c_off, 50),
-                        ("STATE",      s_off,  2),
-                        ("ZIP",        z_off, 10),
-                    ]
-
-            # ── Step 3: exhaustive single-byte scan ───────────────────────
-            log.warning("[CAD] all static layouts failed, exhaustive scan")
-            for off in range(19, min(200, rec_len - 40)):
-                sample = first_line[off:off+40].decode("latin-1","replace")
-                if _re.match(r"^[A-Z][A-Z ,.\-']+$", sample.strip()) \
-                        and len(sample.strip()) >= 8:
-                    log.info(f"[CAD] exhaustive hit at {off}: {sample.strip()[:25]!r}")
-                    return [
-                        ("PROP_ID",    0,      min(19, off)),
-                        ("OWNER_NAME", off,    75),
-                        ("ADDR1",      off+75, 75),
-                        ("CITY",       off+150,50),
-                        ("STATE",      off+200, 2),
-                        ("ZIP",        off+202,10),
-                    ]
-
-        return None
-
-    @staticmethod
-    def _scan_name_offset(lines: list[bytes], rec_len: int) -> int | None:
-        """
-        Find where owner names appear.
-        Owner names look like: "SMITH, JOHN" or "ABC PROPERTIES LLC" or "JONES MARY E"
-        They have: commas OR mixed short/long words OR "LLC/INC/TRUST/LTD"
-        Cities look like: "GALVESTON    TX" or "FRIENDSWOOD    TX" (city + state abbrev)
-        We reject patterns that look like city+state.
-        """
-        import re as _re
-        name_pat  = _re.compile(rb"[A-Z][A-Z ,.\-']{9,}[A-Z]")
-        # City pattern: city name followed by 2-char state abbreviation with spaces
-        city_pat  = _re.compile(rb"[A-Z]{4,}\s{2,}[A-Z]{2}\s*$")
-        # Name quality indicators: comma (LAST, FIRST) or LLC/INC/CORP/TRUST
-        name_qual = _re.compile(rb"(,\s*[A-Z]|LLC|INC|CORP|TRUST|LTD|L\.P\.|ESTATE)")
-
-        votes: dict[int, int] = {}
-        for line in lines:
-            if len(line) < 60:
+        lines = data.split(b"\n")
+        for raw_line in lines:
+            line = raw_line.rstrip(b"\r")
+            if len(line) < min_len:
                 continue
-            for m in name_pat.finditer(line[19:]):
-                off = m.start() + 19
-                val = m.group()
-                val_str = val.decode("latin-1","replace")
-
-                # Reject if too few distinct chars
-                if len(set(val_str.replace(" ","").replace(",",""))) < 3:
+            try:
+                row = {}
+                for fname, start, length in cols:
+                    row[fname] = line[start:start + length].decode(
+                        "latin-1", "replace").strip()
+                # Skip records with no owner name
+                if not row["PY_OWNER_NAME"]:
+                    blank_owner += 1
                     continue
-                # Reject if it looks like a city+state pattern
-                if city_pat.search(val):
-                    continue
-                # Boost score if it has name-quality indicators
-                score = 1
-                if name_qual.search(val):
-                    score = 3
-                elif b"," in val:
-                    score = 2
-                votes[off] = votes.get(off, 0) + score
+                rows.append(row)
+                count += 1
+                if count == 1:
+                    log.info(f"[CAD] APPRAISAL_INFO sample: "
+                             f"owner={row['PY_OWNER_NAME']!r} "
+                             f"addr={row['PY_ADDR_LINE1']!r} "
+                             f"city={row['PY_ADDR_CITY']!r} "
+                             f"situs={row['SITUS_PREFX'].strip()+row['SITUS_STREET']!r}")
+            except Exception:
+                pass
 
-        if not votes:
-            return None
-        best = max(votes, key=votes.get)
-        return best if votes[best] >= 2 else None
-
-    @staticmethod
-    def _scan_addr_offset(lines: list[bytes], name_off: int, rec_len: int) -> int | None:
-        """Find mailing address: digits followed by uppercase street name."""
-        import re as _re
-        pat = _re.compile(rb"\d{1,6} +[A-Z][A-Z ]{5,}")
-        for line in lines:
-            search_from = name_off + 20
-            if len(line) < search_from + 20:
-                continue
-            for m in pat.finditer(line[search_from:]):
-                off = m.start() + search_from
-                if off > name_off + 5:
-                    return off
-        return None
-
-    @staticmethod
-    def _scan_city_offset(lines: list[bytes], after_off: int, rec_len: int) -> int | None:
-        """Find city: uppercase word(s) after address block."""
-        import re as _re
-        pat = _re.compile(rb"[A-Z][A-Z ]{4,}")
-        search_from = after_off + 30
-        for line in lines:
-            if len(line) < search_from + 10:
-                continue
-            window = line[search_from: min(search_from+200, len(line))]
-            for m in pat.finditer(window):
-                off = m.start() + search_from
-                val = m.group().decode("latin-1","replace").strip()
-                if len(val) >= 5 and not val.replace(" ","").isdigit():
-                    return off
-        return None
+        log.info(f"[CAD] APPRAISAL_INFO: {len(rows):,} records "
+                 f"(skipped {blank_owner:,} with blank owner)")
+        return rows
 
 
     def lookup(self, owner: str) -> dict:
