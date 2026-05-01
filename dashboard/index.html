@@ -179,22 +179,48 @@ let sortCol = 'score', sortAsc = false;
 const HOT_FLAGS = new Set(['Lis pendens','Pre-foreclosure','Judgment lien','Tax lien']);
 
 async function loadData(){
-  try{
-    const resp = await fetch('records.json?t='+Date.now());
-    const data = await resp.json();
-    allRecords = data.records || [];
-    const dr = data.date_range;
-    document.getElementById('header-meta').textContent =
-      dr&&dr.from ? `${dr.from} → ${dr.to}` : 'No data yet';
-    if(data.fetched_at)
-      document.getElementById('fetched-at').textContent =
-        'Last updated: '+new Date(data.fetched_at).toLocaleString();
-    updateStats(allRecords);
-    renderTable();
-  }catch(e){
-    document.getElementById('table-body').innerHTML =
-      '<tr><td colspan="8" class="empty"><div class="empty-icon">📭</div><div>No data yet. Trigger the GitHub Action to run the first scrape.</div></td></tr>';
+  // Try multiple paths for compatibility with GitHub Pages and local serving
+  const paths = ['records.json', './records.json', 'dashboard/records.json'];
+  let data = null;
+
+  for(const path of paths){
+    try{
+      const resp = await fetch(path + '?t=' + Date.now());
+      if(!resp.ok) continue;
+      const json = await resp.json();
+      if(json && typeof json.total !== 'undefined'){
+        data = json;
+        console.log(`Loaded from: ${path}, total=${data.total}`);
+        break;
+      }
+    }catch(e){
+      console.warn(`Failed to load from ${path}:`, e.message);
+    }
   }
+
+  if(!data || !data.total){
+    document.getElementById('header-meta').textContent = data ? 'No leads yet — run the scraper' : 'Error loading data';
+    document.getElementById('table-body').innerHTML =
+      `<tr><td colspan="8" class="empty">
+        <div class="empty-icon">📭</div>
+        <div>${data ? 'No motivated seller leads found yet.' : 'Could not load records.json'}</div>
+        <div style="margin-top:8px;font-size:11px;color:var(--muted)">
+          Run the GitHub Action manually from the Actions tab to scrape fresh data.
+        </div>
+      </td></tr>`;
+    if(data) updateStats([]);
+    return;
+  }
+
+  allRecords = data.records || [];
+  const dr = data.date_range;
+  document.getElementById('header-meta').textContent =
+    dr&&dr.from ? `${dr.from} → ${dr.to} · ${data.total} leads` : `${data.total} leads`;
+  if(data.fetched_at)
+    document.getElementById('fetched-at').textContent =
+      'Last updated: ' + new Date(data.fetched_at).toLocaleString();
+  updateStats(allRecords);
+  renderTable();
 }
 
 function updateStats(recs){
