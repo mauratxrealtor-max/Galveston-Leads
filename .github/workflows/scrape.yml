@@ -48,12 +48,28 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
-      - name: Verify output files
+      - name: Verify records written
         run: |
-          echo "=== dashboard/records.json (first 3 lines) ==="
-          head -3 dashboard/records.json
+          echo "=== File sizes ==="
+          ls -la dashboard/records.json data/records.json || echo "Files not found!"
           echo "=== Record count ==="
-          python3 -c "import json; d=json.load(open('dashboard/records.json')); print(f'total={d[\"total\"]} with_address={d[\"with_address\"]}')"
+          python3 -c "
+          import json, sys
+          try:
+              d = json.load(open('dashboard/records.json'))
+              print(f'dashboard/records.json: total={d[\"total\"]} with_address={d[\"with_address\"]} fetched_at={d[\"fetched_at\"]}')
+          except Exception as e:
+              print(f'ERROR reading dashboard/records.json: {e}')
+              sys.exit(1)
+          "
+          echo "=== First record ==="
+          python3 -c "
+          import json
+          d = json.load(open('dashboard/records.json'))
+          if d['records']:
+              r = d['records'][0]
+              print(f'Top lead: {r.get(\"owner\")} | {r.get(\"cat_label\")} | score={r.get(\"score\")}')
+          "
 
       - name: Upload debug artifacts
         if: always()
@@ -63,6 +79,7 @@ jobs:
           path: |
             /tmp/ava_*.png
             /tmp/ava_results_*.html
+            dashboard/records.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -70,13 +87,20 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add dashboard/records.json data/records.json data/ghl_export_*.csv || true
-          git diff --staged --quiet && echo "No changes to commit" || git commit -m "chore: update records $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git push
+          git status
+          git add dashboard/records.json data/records.json
+          git add data/ghl_export_*.csv 2>/dev/null || true
+          git status
+          if git diff --staged --quiet; then
+            echo "⚠️  No staged changes — records.json may not have changed"
+          else
+            git commit -m "chore: update records $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+            echo "✅ Committed and pushed"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Deploy pages IN THE SAME JOB — avoids race condition with separate job
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
