@@ -787,16 +787,21 @@ class ClerkScraper:
             log.info(f"[Clerk][{label}] result text: {snippet!r}")
 
             # Extract dates from header: "|MM/DD/YYYY|MM/DD/YYYY Results:"
-            header_m = re.search(r"|([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})|([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})",
+            header_m = re.search(r"[|]([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})[|]([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})",
                                   result_text)
+            def strip_zeros(d):
+                if not d:
+                    return ""
+                try:
+                    parts = d.split("/")
+                    return "/".join(str(int(p)) for p in parts)
+                except Exception:
+                    return d or ""
+
             if header_m:
                 hdr_from = header_m.group(1)
                 hdr_to   = header_m.group(2)
                 log.info(f"[Clerk][{label}] header dates: {hdr_from} → {hdr_to}")
-                # Normalize for comparison (strip leading zeros)
-                def strip_zeros(d):
-                    parts = d.split("/")
-                    return "/".join(str(int(p)) for p in parts)
                 expected_from = strip_zeros(date_from)
                 expected_to   = strip_zeros(date_to)
                 got_from      = strip_zeros(hdr_from)
@@ -806,8 +811,12 @@ class ClerkScraper:
                                 f"expected {expected_from}→{expected_to} "
                                 f"got {got_from}→{got_to} — retrying")
                     continue
-
-            log.info(f"[Clerk][{label}] s{strategy}: dates verified ✓")
+                log.info(f"[Clerk][{label}] s{strategy}: dates verified ✓")
+            else:
+                # No date header found in result — log but proceed anyway
+                # (the URL is #/searchresults so it IS a result page)
+                log.info(f"[Clerk][{label}] s{strategy}: no date header found, "
+                         f"proceeding (url=searchresults)")
             await self._harvest(page, label=label)
             return
 
