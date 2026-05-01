@@ -59,7 +59,7 @@ LEAD_TYPES: dict[str, tuple[str, list[str]]] = {
     "NOFC":     ("Notice of Foreclosure",  ["NOFC", "NOTFORECLOSURE", "FORECLOSURE", "NOF",
                                             "NOTICE OF FORECLOSURE", "NTCFORECLOSURE"]),
     "TAXDEED":  ("Tax Deed",               ["TAXDEED", "TAX DEED", "TAXD", "TD"]),
-    "JUD":      ("Judgment",               ["JUD", "JUDGMENT", "JUDG"]),
+    "JUD":      ("Judgment",               ["JUD", "JUDGMENT", "JUDG", "A OF J", "ABSTRACTOFJUDGMENT", "ABSTRACT OF JUDGMENT"]),
     "CCJ":      ("Certified Judgment",     ["CCJ", "CERTJUD", "CERTIFIEDJUDGMENT"]),
     "DRJUD":    ("Domestic Judgment",      ["DRJUD", "DOMJUD", "DOMESTICJUD"]),
     "LNCORPTX": ("Corp Tax Lien",          ["LNCORPTX", "CORPTAX", "CORPTAXLIEN"]),
@@ -559,11 +559,11 @@ class ParcelIndex:
                               if Path(n).suffix.upper() == ".TXT"
                               if zf.getinfo(n).file_size > 10_000]
             for name in deferral_files:
-                log.info(f"[CAD] loading tax deferral: {name}")
+                log.info(f"[CAD] loading tax deferral: {name} (will index after parcels)")
                 try:
-                    self._load_tax_deferral(zf.read(name))
+                    self._deferral_raw = zf.read(name)  # store, load after indexing
                 except Exception as exc:
-                    log.warning(f"[CAD] tax deferral load failed: {exc}")
+                    log.warning(f"[CAD] tax deferral read failed: {exc}")
 
         except zipfile.BadZipFile:
             log.warning("[CAD] not a ZIP – trying raw parse")
@@ -576,6 +576,14 @@ class ParcelIndex:
             except Exception:
                 pass
         log.info(f"[CAD] index built: {len(self._by_name):,} name keys")
+
+        # Load tax deferral data AFTER parcel index is built (for better matching)
+        if hasattr(self, "_deferral_raw") and self._deferral_raw:
+            try:
+                self._load_tax_deferral(self._deferral_raw)
+                del self._deferral_raw
+            except Exception as exc:
+                log.warning(f"[CAD] tax deferral post-index load failed: {exc}")
 
     def _parse_appraisal_info(self, data: bytes) -> list[dict]:
         """
