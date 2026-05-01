@@ -149,6 +149,7 @@ tr.detail-row.hidden{display:none;}
           <th onclick="sortBy('score')">Score <span class="sort-arrow" id="arr-score">▼</span></th>
           <th onclick="sortBy('filed')">Filed <span class="sort-arrow" id="arr-filed"></span></th>
           <th onclick="sortBy('cat')">Type <span class="sort-arrow" id="arr-cat"></span></th>
+          <th onclick="sortBy('doc_num')" style="white-space:nowrap">Doc # <span class="sort-arrow" id="arr-doc_num"></span></th>
           <th onclick="sortBy('owner')">Owner / Party 1 <span class="sort-arrow" id="arr-owner"></span></th>
           <th>Property Address</th>
           <th onclick="sortBy('amount')">Amount <span class="sort-arrow" id="arr-amount"></span></th>
@@ -220,7 +221,7 @@ async function loadData(){
   if(!data || !data.total){
     document.getElementById('header-meta').textContent = data ? 'No leads yet — run the scraper' : 'Error loading data';
     document.getElementById('table-body').innerHTML =
-      `<tr><td colspan="8" class="empty">
+      `<tr><td colspan="9" class="empty">
         <div class="empty-icon">📭</div>
         <div>${data ? 'No motivated seller leads found yet.' : 'Could not load records.json'}</div>
         <div style="margin-top:8px;font-size:11px;color:var(--muted)">
@@ -297,7 +298,7 @@ function renderPage(){
   const slice=filtered.slice((currentPage-1)*PAGE_SIZE, currentPage*PAGE_SIZE);
   const tb=document.getElementById('table-body');
   if(!slice.length){
-    tb.innerHTML='<tr><td colspan="8" class="empty"><div class="empty-icon">🔍</div><div>No records match your filters.</div></td></tr>';
+    tb.innerHTML='<tr><td colspan="9" class="empty"><div class="empty-icon">🔍</div><div>No records match your filters.</div></td></tr>';
     return;
   }
   tb.innerHTML=slice.map((r,i)=>{
@@ -306,18 +307,22 @@ function renderPage(){
     const flags=(r.flags||[]).map(f=>`<span class="flag-chip ${HOT_FLAGS.has(f)?'hot':deferral_flags.has(f)?'deferral':''}">${f}</span>`).join('');
     const amt=r.amount?'$'+Number(r.amount).toLocaleString('en-US',{minimumFractionDigits:2}):'—';
     const idx=(currentPage-1)*PAGE_SIZE+i;
+    const docLink=r.clerk_url
+      ?`<a href="${r.clerk_url}" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;white-space:nowrap">${r.doc_num||'—'} ↗</a>`
+      :`<span style="font-size:11px;color:var(--muted)">${r.doc_num||'—'}</span>`;
     return `<tr class="data-row" id="row-${idx}" onclick="toggleDetail(${idx})">
       <td><span class="expand-icon" id="exp-${idx}">▶</span></td>
       <td><span class="score-badge ${scoreClass(score)}">${score}</span></td>
       <td style="white-space:nowrap">${r.filed||'—'}</td>
       <td><span class="cat-pill cat-${r.cat||''}">${r.cat_label||r.doc_type||'—'}</span></td>
+      <td>${docLink}</td>
       <td>${esc(r.owner||'—')}</td>
       <td style="font-size:12px">${esc(propAddr)}</td>
       <td style="white-space:nowrap">${amt}</td>
       <td>${flags||'—'}</td>
     </tr>
     <tr class="detail-row hidden" id="detail-${idx}">
-      <td colspan="8">${buildDetail(r)}</td>
+      <td colspan="9">${buildDetail(r)}</td>
     </tr>`;
   }).join('');
 }
