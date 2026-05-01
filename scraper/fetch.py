@@ -2286,12 +2286,20 @@ def enrich_records(raw_records: list[dict], parcel_index: ParcelIndex) -> list[d
             ava_prop_state = raw.get("_prop_state", "")
             ava_prop_zip   = raw.get("_prop_zip", "")
 
+            # Map doc type here — _parse_ava_text returns raw_type only, no cat yet
+            raw_type = raw.get("raw_type", "")
+            if raw.get("cat"):
+                cat, cat_label = raw["cat"], raw.get("cat_label", "")
+            else:
+                mapped = map_doc_type(raw_type)
+                cat, cat_label = (mapped[0], mapped[1]) if mapped else ("", "")
+
             rec: dict[str, Any] = {
                 "doc_num":      raw.get("doc_num", ""),
-                "doc_type":     raw.get("raw_type", ""),
+                "doc_type":     raw_type,
                 "filed":        raw.get("filed", ""),
-                "cat":          raw.get("cat", ""),
-                "cat_label":    raw.get("cat_label", ""),
+                "cat":          cat,
+                "cat_label":    cat_label,
                 "owner":        owner,
                 "grantee":      raw.get("grantee", ""),
                 "amount":       raw.get("amount"),
