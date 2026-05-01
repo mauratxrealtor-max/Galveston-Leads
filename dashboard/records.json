@@ -1,12 +1,12 @@
 {
-  "fetched_at": "2026-05-01T00:48:33.693505Z",
+  "fetched_at": "2026-05-01T00:57:01.334442Z",
   "source": "Galveston County Clerk (AVA) + GCAD Parcel Data",
   "date_range": {
     "from": "2026-01-31",
     "to": "2026-05-01"
   },
-  "total": 107,
-  "with_address": 77,
+  "total": 118,
+  "with_address": 79,
   "records": [
     {
       "doc_num": "2026019845",
@@ -217,6 +217,32 @@
       "score": 60,
       "flags": [
         "Mechanic lien",
+        "New this week"
+      ]
+    },
+    {
+      "doc_num": "2026019606",
+      "doc_type": "A OF J",
+      "filed": "2026-04-30",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "KUPRIN MAKSIM",
+      "grantee": "STARKEY CHAUNCEY",
+      "amount": null,
+      "legal": "",
+      "prop_address": "MURIEL",
+      "prop_city": "LA MARQUE",
+      "prop_state": "TX",
+      "prop_zip": "77568",
+      "mail_address": "1010 MONTOUR DR",
+      "mail_city": "HOUSTON",
+      "mail_state": "TX",
+      "mail_zip": "77062",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019606",
+      "tax_deferral": "",
+      "score": 60,
+      "flags": [
+        "Judgment lien",
         "New this week"
       ]
     },
@@ -611,6 +637,32 @@
       ]
     },
     {
+      "doc_num": "2026019690",
+      "doc_type": "A OF J",
+      "filed": "2026-04-30",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "SHARED RESOURCES CREDIT UNION",
+      "grantee": "SHARP RICHARD",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019690",
+      "tax_deferral": "",
+      "score": 55,
+      "flags": [
+        "Judgment lien",
+        "New this week"
+      ]
+    },
+    {
       "doc_num": "2026019664",
       "doc_type": "CONTRACT",
       "filed": "2026-04-30",
@@ -660,6 +712,110 @@
       "flags": [
         "Pre-foreclosure",
         "New this week"
+      ]
+    },
+    {
+      "doc_num": "2026009138",
+      "doc_type": "A OF J",
+      "filed": "2026-03-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "NATIONAL WHOLESALE SUPPLY INC",
+      "grantee": "DH SERVICES LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026009138",
+      "tax_deferral": "",
+      "score": 50,
+      "flags": [
+        "Judgment lien",
+        "LLC / corp owner"
+      ]
+    },
+    {
+      "doc_num": "2026009034",
+      "doc_type": "A OF J",
+      "filed": "2026-03-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "STELLANTIS FINANCIAL SERVICES INC",
+      "grantee": "BIRD JENNIFER LEANN",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026009034",
+      "tax_deferral": "",
+      "score": 50,
+      "flags": [
+        "Judgment lien",
+        "LLC / corp owner"
+      ]
+    },
+    {
+      "doc_num": "2026008911",
+      "doc_type": "A OF J",
+      "filed": "2026-02-27",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "NATIONAL FUNDING INC",
+      "grantee": "BUENO BROS NATURAL FOODS LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026008911",
+      "tax_deferral": "",
+      "score": 50,
+      "flags": [
+        "Judgment lien",
+        "LLC / corp owner"
+      ]
+    },
+    {
+      "doc_num": "2026008893",
+      "doc_type": "A OF J",
+      "filed": "2026-02-27",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "JM FUNDING GROUP INC",
+      "grantee": "BLU BEVERAGES LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026008893",
+      "tax_deferral": "",
+      "score": 50,
+      "flags": [
+        "Judgment lien",
+        "LLC / corp owner"
       ]
     },
     {
@@ -1440,6 +1596,31 @@
       ]
     },
     {
+      "doc_num": "2026014891",
+      "doc_type": "A OF J",
+      "filed": "2026-04-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "BRANDRETH KAREN",
+      "grantee": "PEREZ EDUARDO G",
+      "amount": null,
+      "legal": "",
+      "prop_address": "LAUGHING GULL LN",
+      "prop_city": "TEXAS CITY",
+      "prop_state": "TX",
+      "prop_zip": "77590",
+      "mail_address": "626 LAUGHING GULL LN",
+      "mail_city": "TEXAS CITY",
+      "mail_state": "TX",
+      "mail_zip": "77590",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026014891",
+      "tax_deferral": "",
+      "score": 45,
+      "flags": [
+        "Judgment lien"
+      ]
+    },
+    {
       "doc_num": "2026000370",
       "doc_type": "FORECLOSURE FILED",
       "filed": "2026-04-02",
@@ -1515,6 +1696,81 @@
       ]
     },
     {
+      "doc_num": "2026009154",
+      "doc_type": "A OF J",
+      "filed": "2026-03-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "MATA JESUS R",
+      "grantee": "CARDONA MARCOS",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026009154",
+      "tax_deferral": "",
+      "score": 40,
+      "flags": [
+        "Judgment lien"
+      ]
+    },
+    {
+      "doc_num": "2026009115",
+      "doc_type": "A OF J",
+      "filed": "2026-03-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "DUGOOD FEDERAL CREDIT UNION",
+      "grantee": "HUNTON JOHN CECIL",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026009115",
+      "tax_deferral": "",
+      "score": 40,
+      "flags": [
+        "Judgment lien"
+      ]
+    },
+    {
+      "doc_num": "2026009096",
+      "doc_type": "A OF J",
+      "filed": "2026-03-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "COTTLE JOSHUA ATTY",
+      "grantee": "AMITY INNOVATIONS LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026009096",
+      "tax_deferral": "",
+      "score": 40,
+      "flags": [
+        "Judgment lien"
+      ]
+    },
+    {
       "doc_num": "2026008896",
       "doc_type": "LIEN AFFD",
       "filed": "2026-02-27",
@@ -1562,6 +1818,31 @@
       "score": 40,
       "flags": [
         "Pre-foreclosure"
+      ]
+    },
+    {
+      "doc_num": "2026014728",
+      "doc_type": "A OF J",
+      "filed": "2026-04-02",
+      "cat": "JUD",
+      "cat_label": "Judgment",
+      "owner": "WESTERN EQUIPMENT FINANCE",
+      "grantee": "",
+      "amount": null,
+      "legal": "",
+      "prop_address": "",
+      "prop_city": "",
+      "prop_state": "TX",
+      "prop_zip": "",
+      "mail_address": "",
+      "mail_city": "",
+      "mail_state": "TX",
+      "mail_zip": "",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026014728",
+      "tax_deferral": "",
+      "score": 40,
+      "flags": [
+        "Judgment lien"
       ]
     },
     {
