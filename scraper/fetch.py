@@ -202,6 +202,10 @@ def score_record(rec: dict) -> tuple[int, list[str]]:
     if re.search(r"\b(LLC|INC|CORP|LTD|LLP|TRUST|TRUSTEE)\b", owner.upper()):
         flags.append("LLC / corp owner")
     if is_new_this_week(filed): flags.append("New this week")
+    # Tax deferral from CAD (passed in rec directly)
+    if rec.get("tax_deferral"):
+        flags.append("Tax deferral")
+        score += 15  # elderly/disabled owner, deferred taxes = motivated seller
 
     score += 10 * len(flags)
     if "Lis pendens" in flags and "Pre-foreclosure" in flags:
@@ -533,10 +537,8 @@ class ParcelIndex:
                 data_bytes = zf.read(name)
 
                 if "APPRAISAL_INFO" in name.upper():
-                    # Use confirmed layout, stream parse
                     rows = self._parse_appraisal_info(data_bytes)
                 else:
-                    # Dynamic scan for AGENT_OWNER
                     cols = self._guess_fixed_width_layout(name, data_bytes)
                     rows = self._auto_parse(data_bytes, name, cols)
 
@@ -545,12 +547,23 @@ class ParcelIndex:
                         "PY_OWNER_NAME","OWNER_NAME","OWNER","OWN1")
                     log.info(f"[CAD] sample keys: {list(rows[0].keys())[:10]}")
                     log.info(f"[CAD] sample owner: {owner_sample!r}")
-                    # Validate owner looks like a name
                     if owner_sample and not re.match(r"^[\d\s]+$", owner_sample.strip()):
                         break
                     else:
                         log.warning(f"[CAD] {name}: owner looks numeric, trying next")
                         rows = []
+
+            # ── Also load TAX_DEFERRAL_INFO for motivated seller flags ────────
+            deferral_files = [n for n in names
+                              if "TAX_DEFERRAL" in n.upper()
+                              if Path(n).suffix.upper() == ".TXT"
+                              if zf.getinfo(n).file_size > 10_000]
+            for name in deferral_files:
+                log.info(f"[CAD] loading tax deferral: {name}")
+                try:
+                    self._load_tax_deferral(zf.read(name))
+                except Exception as exc:
+                    log.warning(f"[CAD] tax deferral load failed: {exc}")
 
         except zipfile.BadZipFile:
             log.warning("[CAD] not a ZIP – trying raw parse")
@@ -606,6 +619,44 @@ class ParcelIndex:
         return rows
 
 
+    def _load_tax_deferral(self, data: bytes):
+        """
+        Parse APPRAISAL_TAX_DEFERRAL_INFO.TXT and flag owners with tax deferrals.
+        Confirmed layout (224 bytes/record):
+          [0:12]   PROP_ID
+          [12:24]  ENTITY_ID
+          [24:48]  EXEMPT_CODE (OV65=over65, DP=disabled, DV*=disabled veteran)
+          [48:56]  CERT_DATE
+          [79:129] GEO_ID
+          [129:209] OWNER_NAME (80 chars)
+        """
+        lines = [l.rstrip(b"\r") for l in data.split(b"\n") if len(l.strip()) > 100]
+        count = 0
+        for line in lines:
+            try:
+                owner_name = line[129:209].decode("latin-1","replace").strip()
+                exempt_code = line[24:28].decode("latin-1","replace").strip()
+                if not owner_name:
+                    continue
+                # Mark all name variants with deferral flag
+                flag_val = f"Tax deferral ({exempt_code})"
+                for key in [
+                    normalize(owner_name),
+                    normalize(" ".join(reversed(owner_name.split(",",1))
+                              if "," in owner_name else [owner_name])),
+                ]:
+                    if key and key in self._by_name:
+                        self._by_name[key]["tax_deferral"] = flag_val
+                        count += 1
+                        break
+                # Also store in a separate deferral set for direct lookup
+                if not hasattr(self, "_deferral_owners"):
+                    self._deferral_owners: dict[str, str] = {}
+                self._deferral_owners[normalize(owner_name)] = flag_val
+            except Exception:
+                pass
+        log.info(f"[CAD] tax deferral: {len(lines)} records, {count} matched to parcel index")
+
     def lookup(self, owner: str) -> dict:
         if not self._loaded:
             self.load()
@@ -621,7 +672,19 @@ class ParcelIndex:
                 keys.append(normalize(f"{sp[-1]} {' '.join(sp[:-1])}"))
         for k in keys:
             if k in self._by_name:
-                return self._by_name[k]
+                result = dict(self._by_name[k])
+                # Also check deferral flag
+                if hasattr(self, "_deferral_owners"):
+                    for dk in keys:
+                        if dk in self._deferral_owners:
+                            result["tax_deferral"] = self._deferral_owners[dk]
+                            break
+                return result
+        # Even if not in address index, check deferral set
+        if hasattr(self, "_deferral_owners"):
+            for k in keys:
+                if k in self._deferral_owners:
+                    return {"tax_deferral": self._deferral_owners[k]}
         return {}
 
 
@@ -2242,6 +2305,7 @@ def enrich_records(raw_records: list[dict], parcel_index: ParcelIndex) -> list[d
                 "mail_state":   parcel.get("mail_state", "TX"),
                 "mail_zip":     parcel.get("mail_zip", ""),
                 "clerk_url":    raw.get("clerk_url", ""),
+                "tax_deferral": parcel.get("tax_deferral", ""),
             }
             rec["score"], rec["flags"] = score_record(rec)
             enriched.append(rec)
