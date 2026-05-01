@@ -74,6 +74,7 @@ tr.detail-row.hidden{display:none;}
 
 .flag-chip{display:inline-block;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;color:var(--muted);margin:1px 2px 1px 0;white-space:nowrap;}
 .flag-chip.hot{border-color:#f06565;color:#f06565;}
+.flag-chip.deferral{border-color:#f7c04f;color:#f7c04f;background:#2d2a1a;}
 
 .empty{text-align:center;padding:60px 20px;color:var(--muted);}
 .empty-icon{font-size:48px;margin-bottom:12px;}
@@ -257,7 +258,7 @@ function renderPage(){
   tb.innerHTML=slice.map((r,i)=>{
     const score=r.score||0;
     const propAddr=[r.prop_address,r.prop_city,r.prop_state,r.prop_zip].filter(Boolean).join(', ')||'—';
-    const flags=(r.flags||[]).map(f=>`<span class="flag-chip ${HOT_FLAGS.has(f)?'hot':''}">${f}</span>`).join('');
+    const flags=(r.flags||[]).map(f=>`<span class="flag-chip ${HOT_FLAGS.has(f)?'hot':deferral_flags.has(f)?'deferral':''}">${f}</span>`).join('');
     const amt=r.amount?'$'+Number(r.amount).toLocaleString('en-US',{minimumFractionDigits:2}):'—';
     const idx=(currentPage-1)*PAGE_SIZE+i;
     return `<tr class="data-row" id="row-${idx}" onclick="toggleDetail(${idx})">
