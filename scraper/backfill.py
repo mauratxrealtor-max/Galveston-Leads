@@ -1,436 +1,202 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Galveston County — Backfill Leads (365 Days)</title>
-<style>
-:root{
-  --bg:#0f1117;--surface:#1a1d27;--card:#21253a;--border:#2d3151;
-  --accent:#4f8ef7;--accent2:#f7c04f;--green:#3ecf8e;--red:#f06565;
-  --text:#e4e8f0;--muted:#7a82a0;--radius:8px;
-}
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;font-size:14px;}
+#!/usr/bin/env python3
+"""
+Galveston County Motivated Seller — 365-Day Backfill Scraper
+=============================================================
+Reuses all logic from fetch.py. Outputs to dashboard/backfill.json and
+dashboard/backfill.html — never overwrites the daily records.json.
 
-header{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;}
-.logo{font-size:18px;font-weight:700;color:var(--accent);letter-spacing:-.3px;}
-.logo span{color:var(--accent2);}
-.header-meta{font-size:12px;color:var(--muted);}
+Usage:
+    python scraper/backfill.py
+    python scraper/backfill.py --days-back 180
+    python scraper/backfill.py --days-back 365 --chunk-days 3
+"""
 
-.toolbar{padding:14px 24px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--surface);border-bottom:1px solid var(--border);}
-input[type=text],select{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:7px 12px;font-size:13px;outline:none;transition:border-color .15s;}
-input[type=text]:focus,select:focus{border-color:var(--accent);}
-input[type=text]{width:240px;}
-select{cursor:pointer;}
-.btn{background:var(--accent);color:#fff;border:none;border-radius:var(--radius);padding:7px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s;}
-.btn:hover{opacity:.85;}
-.btn-ghost{background:var(--card);border:1px solid var(--border);color:var(--text);}
-.btn-ghost:hover{border-color:var(--accent);}
+import argparse
+import asyncio
+import logging
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 
-.stats-bar{display:flex;gap:14px;padding:14px 24px;flex-wrap:wrap;}
-.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 18px;min-width:120px;}
-.stat-val{font-size:22px;font-weight:700;color:var(--accent);}
-.stat-lbl{font-size:11px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.5px;}
+sys.path.insert(0, str(Path(__file__).parent))
+from fetch import (
+    ClerkScraper, ParcelIndex, enrich_records, build_output,
+    save_json, save_ghl_csv, embed_data_in_dashboard, log,
+    CLERK_AVA_URL,
+)
 
-.fetched-at{font-size:11px;color:var(--muted);padding:4px 24px 0;}
-
-.content{padding:0 24px 40px;}
-.table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border);margin-top:16px;}
-table{width:100%;border-collapse:collapse;}
-thead th{background:var(--surface);color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;}
-thead th:hover{color:var(--text);}
-tbody tr.data-row{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;}
-tbody tr.data-row:hover{background:var(--card);}
-tbody tr.data-row.expanded{background:var(--card);}
-tbody td{padding:10px 12px;vertical-align:middle;}
-.expand-icon{color:var(--muted);font-size:10px;transition:transform .2s;display:inline-block;}
-.expanded .expand-icon{transform:rotate(90deg);}
-
-/* Detail row */
-tr.detail-row td{padding:0;border-bottom:1px solid var(--border);}
-tr.detail-row.hidden{display:none;}
-.detail-panel{padding:16px 20px 16px 44px;background:#191c2c;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;}
-.detail-group{display:flex;flex-direction:column;gap:3px;}
-.detail-label{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);}
-.detail-value{font-size:13px;color:var(--text);}
-.detail-value a{color:var(--accent);text-decoration:none;}
-.detail-value a:hover{text-decoration:underline;}
-
-.score-badge{display:inline-block;border-radius:20px;padding:2px 10px;font-weight:700;font-size:12px;}
-.score-high{background:#1f3a2a;color:var(--green);}
-.score-med{background:#3a2d1a;color:var(--accent2);}
-.score-low{background:#2d1a1a;color:var(--red);}
-
-.cat-pill{display:inline-block;border-radius:4px;padding:1px 7px;font-size:11px;font-weight:600;}
-.cat-LP,.cat-NOFC{background:#2a1f3d;color:#b48ffc;}
-.cat-JUD,.cat-CCJ,.cat-DRJUD{background:#1f3040;color:#5bc0fa;}
-.cat-LNIRS,.cat-LNFED,.cat-LNCORPTX,.cat-TAXDEED{background:#3a1f1f;color:#f06565;}
-.cat-LN,.cat-LNMECH,.cat-LNHOA,.cat-MEDLN{background:#1f2f1f;color:#3ecf8e;}
-.cat-PRO{background:#2d2a1a;color:#f0c96f;}
-.cat-NOC{background:#1f2438;color:#7ab5fa;}
-.cat-RELLP{background:#1e2828;color:#4db89c;}
-.cat-TXDEF{background:#2a1f0f;color:#f7a94f;}
-.cat-CSLN{background:#2a1a2a;color:#c084fc;}
-.cat-STLN{background:#1a2a2a;color:#67e8f9;}
-.cat-WRIT{background:#2a1a1a;color:#f87171;}
-.cat-CONSTLN{background:#1a1a2a;color:#818cf8;}
-.cat-ABSJDG{background:#1f3040;color:#5bc0fa;}
-.cat-FEDTXLN{background:#3a1f1f;color:#f06565;}
-.cat-{background:var(--card);color:var(--muted);}
-
-.flag-chip{display:inline-block;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:10px;color:var(--muted);margin:1px 2px 1px 0;white-space:nowrap;}
-.flag-chip.hot{border-color:#f06565;color:#f06565;}
-.flag-chip.deferral{border-color:#f7c04f;color:#f7c04f;background:#2d2a1a;}
-
-.empty{text-align:center;padding:60px 20px;color:var(--muted);}
-.empty-icon{font-size:48px;margin-bottom:12px;}
-
-.pagination{display:flex;gap:6px;align-items:center;justify-content:flex-end;padding:14px 0;flex-wrap:wrap;}
-.pagination button{background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:13px;}
-.pagination button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
-.pagination button:disabled{opacity:.4;cursor:default;}
-.page-info{color:var(--muted);font-size:12px;}
-.sort-arrow{font-size:9px;margin-left:3px;}
-</style>
-</head>
-<body>
-
-<header>
-  <div class="logo">📚 <span>Galveston</span> Backfill Leads (365 Days)</div>
-  <a href="backfill.html" style="color:var(--accent2);font-size:12px;text-decoration:none">📦 365-Day Backfill →</a>
-  <div class="header-meta" id="header-meta">Loading…</div>
-</header>
-
-<div class="toolbar">
-  <input type="text" id="search" placeholder="🔍  Search owner, address, doc #…" oninput="renderTable()"/>
-  <select id="cat-filter" onchange="renderTable()">
-    <option value="">All Lead Types</option>
-    <option value="LP">Lis Pendens</option>
-    <option value="NOFC">Notice of Foreclosure</option>
-    <option value="TAXDEED">Tax Deed</option>
-    <option value="JUD">Judgment</option>
-    <option value="CCJ">Certified Judgment</option>
-    <option value="DRJUD">Domestic Judgment</option>
-    <option value="LNCORPTX">Corp Tax Lien</option>
-    <option value="LNIRS">IRS Lien</option>
-    <option value="LNFED">Federal Lien</option>
-    <option value="LN">Lien</option>
-    <option value="LNMECH">Mechanic Lien</option>
-    <option value="LNHOA">HOA Lien</option>
-    <option value="MEDLN">Medicaid Lien</option>
-    <option value="PRO">Probate</option>
-    <option value="NOC">Notice of Commencement</option>
-    <option value="RELLP">Release Lis Pendens</option>
-    <option value="TXDEF">Tax Deferral (OV65/DP)</option>
-    <option value="ABSJDG">Abstract of Judgment</option>
-    <option value="CSLN">Child Support Lien</option>
-    <option value="STLN">State Tax Lien</option>
-    <option value="WRIT">Writ / Execution</option>
-    <option value="CONSTLN">Constable Lien</option>
-    <option value="FEDTXLN">Federal Tax Lien</option>
-  </select>
-  <select id="score-filter" onchange="renderTable()">
-    <option value="">All Scores</option>
-    <option value="70">Score ≥ 70 (Hot)</option>
-    <option value="50">Score ≥ 50 (Warm)</option>
-    <option value="30">Score ≥ 30</option>
-  </select>
-  <select id="addr-filter" onchange="renderTable()">
-    <option value="">All Records</option>
-    <option value="1">Has Address Only</option>
-  </select>
-  <select id="leads-filter" onchange="renderTable()">
-    <option value="">All Doc Types</option>
-    <option value="leads">Lead Types Only</option>
-  </select>
-  <button class="btn btn-ghost" onclick="exportCSV()">⬇ Export CSV</button>
-</div>
-
-<div class="stats-bar" id="stats-bar">
-  <div class="stat"><div class="stat-val" id="s-total">—</div><div class="stat-lbl">Total Leads</div></div>
-  <div class="stat"><div class="stat-val" id="s-hot">—</div><div class="stat-lbl">Hot (≥70)</div></div>
-  <div class="stat"><div class="stat-val" id="s-addr">—</div><div class="stat-lbl">With Address</div></div>
-  <div class="stat"><div class="stat-val" id="s-new">—</div><div class="stat-lbl">New This Week</div></div>
-</div>
-<div class="fetched-at" id="fetched-at"></div>
-<div style="background:#2a2010;border:1px solid #f7c04f44;border-radius:8px;margin:8px 24px 0;padding:10px 16px;font-size:12px;color:#f7c04f;">📚 365-day historical backfill. <a href="index.html" style="color:var(--accent2)">→ Daily dashboard</a></div>
-
-<div class="content">
-  <div class="table-wrap">
-    <table id="leads-table">
-      <thead>
-        <tr>
-          <th style="width:24px"></th>
-          <th onclick="sortBy('score')">Score <span class="sort-arrow" id="arr-score">▼</span></th>
-          <th onclick="sortBy('filed')">Filed <span class="sort-arrow" id="arr-filed"></span></th>
-          <th onclick="sortBy('cat')">Type <span class="sort-arrow" id="arr-cat"></span></th>
-          <th onclick="sortBy('doc_num')" style="white-space:nowrap">Doc # <span class="sort-arrow" id="arr-doc_num"></span></th>
-          <th onclick="sortBy('owner')">Owner / Party 1 <span class="sort-arrow" id="arr-owner"></span></th>
-          <th>Property Address</th>
-          <th onclick="sortBy('amount')">Amount <span class="sort-arrow" id="arr-amount"></span></th>
-          <th>Flags</th>
-        </tr>
-      </thead>
-      <tbody id="table-body"></tbody>
-    </table>
-  </div>
-  <div class="pagination" id="pagination"></div>
-</div>
-
-<!-- Detail modal (hidden) -->
-<div id="detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;overflow-y:auto;" onclick="if(event.target===this)closeModal()">
-  <div style="max-width:700px;margin:60px auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-      <h2 id="modal-title" style="font-size:16px;color:var(--text);"></h2>
-      <button onclick="closeModal()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;">✕</button>
-    </div>
-    <div id="modal-body" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;"></div>
-  </div>
-</div>
-
+def _build_backfill_html() -> str:
+    """
+    Build backfill dashboard by adapting the working daily index.html.
+    This guarantees the rendering JS is identical to the proven daily dashboard.
+    """
+    from pathlib import Path as _Path
+    # Try to read the daily dashboard
+    for candidate in ["dashboard/index.html", "../dashboard/index.html"]:
+        p = _Path(candidate)
+        if p.exists():
+            html = p.read_text(encoding="utf-8")
+            # Adapt for backfill
+            html = html.replace(
+                "<title>Galveston County \u2014 Motivated Seller Leads</title>",
+                "<title>Galveston County \u2014 Backfill Leads (365 Days)</title>"
+            )
+            html = html.replace(
+                "🏠 <span>Galveston</span> Motivated Seller Leads",
+                "📚 <span>Galveston</span> Backfill Leads (365 Days)"
+            )
+            # Replace ALL records.json with backfill.json
+            html = html.replace("'records.json'", "'backfill.json'")
+            html = html.replace('"records.json"', '"backfill.json"')
+            html = html.replace("'./records.json'", "'./backfill.json'")
+            html = html.replace('"./records.json"', '"./backfill.json"')
+            html = html.replace("records.json", "backfill.json")
+            # Add backfill notice
+            html = html.replace(
+                '<div class="fetched-at" id="fetched-at"></div>',
+                '<div class="fetched-at" id="fetched-at"></div>\n'
+                '<div style="background:#2a2010;border:1px solid #f7c04f44;'
+                'border-radius:8px;margin:8px 24px 0;padding:10px 16px;'
+                'font-size:12px;color:#f7c04f;">📚 365-day historical backfill. '
+                '<a href="index.html" style="color:var(--accent2)">→ Daily dashboard</a></div>'
+            )
+            return html
+    # Fallback: return minimal working HTML
+    return """<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<title>Galveston Backfill</title></head><body>
+<h2>Backfill data loading...</h2>
 <script>
-const PAGE_SIZE = 50;
-let allRecords = [], filtered = [], currentPage = 1;
-let sortCol = 'score', sortAsc = false;
-const HOT_FLAGS = new Set(['Lis pendens','Pre-foreclosure','Judgment lien','Tax lien']);
-const deferral_flags = new Set(['Tax deferral']);
+fetch('backfill.json?t='+Date.now(),{cache:'no-store'})
+  .then(r=>r.json()).then(d=>{
+    document.body.innerHTML='<h2>'+d.total+' backfill leads loaded</h2>'
+    +'<p>Open the full dashboard to view them.</p>';
+  }).catch(e=>{document.body.innerHTML='<h2>Error: '+e+'</h2>';});
+</script></body></html>"""
 
-async function loadData(){
-  let data = null;
 
-  // PRIMARY: read from inline script tag (baked in at deploy time — always works)
-  try{
-    const inlineEl = document.getElementById('inline-records-data');
-    if(inlineEl && inlineEl.textContent.trim()){
-      data = JSON.parse(inlineEl.textContent);
-      if(data && data.total > 0){
-        console.log(`Loaded from inline data: total=${data.total}`);
-      } else {
-        data = null; // fall through to fetch if inline is empty
-      }
-    }
-  }catch(e){
-    console.warn('Inline data parse failed:', e.message);
-    data = null;
-  }
+BACKFILL_HTML = _build_backfill_html()
 
-  // FALLBACK: fetch backfill.json (works when served fresh)
-  if(!data){
-    const paths = ['backfill.json', './backfill.json'];
-    for(const path of paths){
-      try{
-        const resp = await fetch(path + '?t=' + Date.now());
-        if(!resp.ok) continue;
-        const json = await resp.json();
-        if(json && typeof json.total !== 'undefined'){
-          data = json;
-          console.log(`Loaded from fetch ${path}: total=${data.total}`);
-          break;
-        }
-      }catch(e){
-        console.warn(`Fetch failed ${path}:`, e.message);
-      }
-    }
-  }
 
-  if(!data || !data.total){
-    document.getElementById('header-meta').textContent = data ? 'No leads yet — run the scraper' : 'Error loading data';
-    document.getElementById('table-body').innerHTML =
-      `<tr><td colspan="9" class="empty">
-        <div class="empty-icon">📭</div>
-        <div>${data ? 'No motivated seller leads found yet.' : 'Could not load backfill.json'}</div>
-        <div style="margin-top:8px;font-size:11px;color:var(--muted)">
-          Run the GitHub Action manually from the Actions tab to scrape fresh data.
-        </div>
-      </td></tr>`;
-    if(data) updateStats([]);
-    return;
-  }
+async def run_backfill(days_back: int = 365, chunk_days: int = 5):
+    t0 = datetime.now()
+    log.info("=" * 60)
+    log.info(f"Galveston County Motivated Seller — {days_back}-Day Backfill")
+    log.info(f"Window size: {chunk_days} days")
+    log.info("=" * 60)
 
-  allRecords = data.records || [];
-  const dr = data.date_range;
-  document.getElementById('header-meta').textContent =
-    dr&&dr.from ? `${dr.from} → ${dr.to} · ${data.total} leads` : `${data.total} leads`;
-  if(data.fetched_at)
-    document.getElementById('fetched-at').textContent =
-      'Last updated: ' + new Date(data.fetched_at).toLocaleString();
-  updateStats(allRecords);
-  renderTable();
-}
+    # Step 1: Load CAD parcel data
+    log.info("[Step 1/3] Loading GCAD parcel data…")
+    parcel_index = ParcelIndex()
+    parcel_index.load()
 
-function updateStats(recs){
-  const weekAgo = new Date(Date.now()-7*86400000);
-  document.getElementById('s-total').textContent = recs.length.toLocaleString();
-  document.getElementById('s-hot').textContent   = recs.filter(r=>(r.score||0)>=70).length.toLocaleString();
-  document.getElementById('s-addr').textContent  = recs.filter(r=>r.prop_address||r.mail_address).length.toLocaleString();
-  document.getElementById('s-new').textContent   = recs.filter(r=>r.filed&&new Date(r.filed)>=weekAgo).length.toLocaleString();
-}
+    # Step 2: Scrape all windows
+    log.info("[Step 2/3] Scraping Galveston County Clerk portal…")
+    now = datetime.now()
+    chunks: list[tuple[str, str]] = []
+    cursor = now - timedelta(days=days_back)
+    while cursor < now:
+        end = min(cursor + timedelta(days=chunk_days), now)
+        chunks.append((cursor.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")))
+        cursor = end + timedelta(days=1)
 
-function applyFilters(){
-  const q   = document.getElementById('search').value.toLowerCase();
-  const cat = document.getElementById('cat-filter').value;
-  const sc  = parseInt(document.getElementById('score-filter').value)||0;
-  const adr = document.getElementById('addr-filter').value;
-  const lf  = document.getElementById('leads-filter').value;
+    log.info(f"[Backfill] {len(chunks)} windows × ~{chunk_days} days each")
 
-  return allRecords.filter(r=>{
-    if(cat && r.cat!==cat) return false;
-    if(sc  && (r.score||0)<sc) return false;
-    if(adr && !r.prop_address && !r.mail_address) return false;
-    if(lf==='leads' && !r.cat) return false;
-    if(q){
-      const hay=[r.owner,r.grantee,r.doc_num,r.prop_address,r.mail_address,
-                 r.cat_label,r.legal,r.prop_city].join(' ').toLowerCase();
-      if(!hay.includes(q)) return false;
-    }
-    return true;
-  });
-}
+    from playwright.async_api import async_playwright
 
-function sortBy(col){
-  if(sortCol===col){sortAsc=!sortAsc;}
-  else{sortCol=col; sortAsc=col!=='score';}
-  document.querySelectorAll('[id^="arr-"]').forEach(e=>e.textContent='');
-  const a=document.getElementById('arr-'+col);
-  if(a) a.textContent=sortAsc?'▲':'▼';
-  renderTable();
-}
+    scraper = ClerkScraper()
+    # Extend the _accept() date filter to cover the full backfill period
+    import fetch as _fetch
+    _fetch.LOOK_BACK_DAYS = days_back
 
-function renderTable(){
-  filtered=applyFilters();
-  filtered.sort((a,b)=>{
-    let va=a[sortCol]??'', vb=b[sortCol]??'';
-    if(sortCol==='score'||sortCol==='amount'){va=parseFloat(va)||0;vb=parseFloat(vb)||0;}
-    else{va=String(va).toLowerCase();vb=String(vb).toLowerCase();}
-    return va<vb?(sortAsc?-1:1):va>vb?(sortAsc?1:-1):0;
-  });
-  currentPage=1; renderPage(); renderPagination(); updateStats(filtered);
-}
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await ctx.new_page()
 
-function scoreClass(s){return s>=70?'score-high':s>=50?'score-med':'score-low';}
+        for i, (d_from, d_to) in enumerate(chunks):
+            log.info(f"[Backfill] window {i+1}/{len(chunks)}: {d_from} → {d_to}")
+            for attempt in range(3):
+                try:
+                    await scraper._search_window(page, d_from, d_to,
+                                                  label=f"BF{i+1}")
+                    break
+                except Exception as exc:
+                    log.warning(f"[Backfill] w{i+1} attempt {attempt+1}: {exc}")
+                    try:
+                        await page.goto(CLERK_AVA_URL,
+                                        wait_until="domcontentloaded",
+                                        timeout=60_000)
+                        await scraper._dismiss(page)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        pass
 
-function renderPage(){
-  const slice=filtered.slice((currentPage-1)*PAGE_SIZE, currentPage*PAGE_SIZE);
-  const tb=document.getElementById('table-body');
-  if(!slice.length){
-    tb.innerHTML='<tr><td colspan="9" class="empty"><div class="empty-icon">🔍</div><div>No records match your filters.</div></td></tr>';
-    return;
-  }
-  tb.innerHTML=slice.map((r,i)=>{
-    const score=r.score||0;
-    const propAddr=[r.prop_address,r.prop_city,r.prop_state,r.prop_zip].filter(Boolean).join(', ')||'—';
-    const flags=(r.flags||[]).map(f=>`<span class="flag-chip ${HOT_FLAGS.has(f)?'hot':deferral_flags.has(f)?'deferral':''}">${f}</span>`).join('');
-    const amt=r.amount?'$'+Number(r.amount).toLocaleString('en-US',{minimumFractionDigits:2}):'—';
-    const idx=(currentPage-1)*PAGE_SIZE+i;
-    const docLink=r.clerk_url
-      ?`<a href="${r.clerk_url}" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;white-space:nowrap">${r.doc_num||'—'} ↗</a>`
-      :`<span style="font-size:11px;color:var(--muted)">${r.doc_num||'—'}</span>`;
-    return `<tr class="data-row" id="row-${idx}" onclick="toggleDetail(${idx})">
-      <td><span class="expand-icon" id="exp-${idx}">▶</span></td>
-      <td><span class="score-badge ${scoreClass(score)}">${score}</span></td>
-      <td style="white-space:nowrap">${r.filed||'—'}</td>
-      <td><span class="cat-pill cat-${r.cat||''}">${r.cat_label||r.doc_type||'—'}</span></td>
-      <td>${docLink}</td>
-      <td>${esc(r.owner||'—')}</td>
-      <td style="font-size:12px">${esc(propAddr)}</td>
-      <td style="white-space:nowrap">${amt}</td>
-      <td>${flags||'—'}</td>
-    </tr>
-    <tr class="detail-row hidden" id="detail-${idx}">
-      <td colspan="9">${buildDetail(r)}</td>
-    </tr>`;
-  }).join('');
-}
+        await browser.close()
 
-function buildDetail(r){
-  const propAddr=[r.prop_address,r.prop_city,r.prop_state,r.prop_zip].filter(Boolean).join(', ')||'—';
-  const mailAddr=[r.mail_address,r.mail_city,r.mail_state,r.mail_zip].filter(Boolean).join(', ')||'—';
-  const amt=r.amount?'$'+Number(r.amount).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
-  const link=r.clerk_url?`<a href="${r.clerk_url}" target="_blank" rel="noopener">View Document ↗</a>`:'—';
-  const flags=(r.flags||[]).join(' · ')||'—';
+    log.info(f"[Backfill] raw records: {len(scraper.records)}")
 
-  const groups=[
-    ['Document Number', esc(r.doc_num||'—')],
-    ['Document Type',   esc(r.doc_type||r.cat_label||'—')],
-    ['Lead Category',   `<span class="cat-pill cat-${r.cat||''}">${r.cat_label||'—'}</span>`],
-    ['Date Filed',      r.filed||'—'],
-    ['Owner / Party 1', esc(r.owner||'—')],
-    ['Grantee / Party 2', esc(r.grantee||'—')],
-    ['Amount',          amt],
-    ['Property Address',esc(propAddr)],
-    ['Mailing Address', esc(mailAddr)],
-    ['Legal Description', esc(r.legal||'—')],
-    ['Seller Score',    `<span class="score-badge ${scoreClass(r.score||0)}">${r.score||0}</span>`],
-    ['Flags',           flags],
-    ['Public Records',  link],
-  ];
+    # Step 3: Enrich, deduplicate, save
+    log.info("[Step 3/3] Enriching and scoring…")
+    enriched = enrich_records(scraper.records, parcel_index)
 
-  return `<div class="detail-panel">${
-    groups.map(([l,v])=>`<div class="detail-group">
-      <span class="detail-label">${l}</span>
-      <span class="detail-value">${v}</span>
-    </div>`).join('')
-  }</div>`;
-}
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in enriched:
+        key = r.get("doc_num") or f"{r.get('owner')}|{r.get('filed')}"
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
 
-function toggleDetail(idx){
-  const row=document.getElementById('row-'+idx);
-  const det=document.getElementById('detail-'+idx);
-  const exp=document.getElementById('exp-'+idx);
-  if(!det) return;
-  const open=det.classList.contains('hidden');
-  det.classList.toggle('hidden',!open);
-  row.classList.toggle('expanded',open);
-}
+    removed = len(enriched) - len(deduped)
+    log.info(f"[Backfill] {len(deduped)} unique leads "
+             f"(removed {removed} cross-window duplicates)")
 
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+    dates = sorted(r["filed"] for r in deduped if r.get("filed"))
+    date_from = dates[0] if dates else ""
+    date_to   = dates[-1] if dates else ""
+    output = build_output(deduped, date_from, date_to)
 
-function renderPagination(){
-  const total=Math.ceil(filtered.length/PAGE_SIZE);
-  const pg=document.getElementById('pagination');
-  if(total<=1){pg.innerHTML='';return;}
-  let h=`<span class="page-info">${filtered.length.toLocaleString()} records</span>`;
-  h+=`<button ${currentPage===1?'disabled':''} onclick="goPage(${currentPage-1})">‹ Prev</button>`;
-  const s=Math.max(1,currentPage-2), e=Math.min(total,currentPage+2);
-  for(let i=s;i<=e;i++)
-    h+=`<button class="${i===currentPage?'active':''}" onclick="goPage(${i})">${i}</button>`;
-  h+=`<button ${currentPage===total?'disabled':''} onclick="goPage(${currentPage+1})">Next ›</button>`;
-  pg.innerHTML=h;
-}
+    # Save — backfill-specific paths only
+    save_json(output, "dashboard/backfill.json", "data/backfill_latest.json")
+    ts = datetime.now().strftime("%Y%m%d")
+    save_ghl_csv(deduped, f"data/backfill_{ts}.csv")
 
-function goPage(p){currentPage=p;renderPage();renderPagination();window.scrollTo(0,0);}
+    # Write and populate backfill dashboard
+    Path("dashboard/backfill.html").write_text(BACKFILL_HTML, encoding="utf-8")
+    embed_data_in_dashboard(output, "dashboard/backfill.html")
 
-function closeModal(){document.getElementById('detail-modal').style.display='none';}
+    elapsed = (datetime.now() - t0).seconds
+    addr_ct = sum(1 for r in deduped
+                  if r.get("prop_address") or r.get("mail_address"))
+    log.info(f"\n✅  Backfill done in {elapsed}s — "
+             f"{len(deduped)} leads | {addr_ct} with address")
+    if deduped:
+        top = deduped[0]
+        log.info(f"   Top: {top['owner']} | {top['cat_label']} | "
+                 f"score={top['score']} | {top.get('prop_address','no address')}")
 
-function exportCSV(){
-  const cols=['First Name','Last Name','Mailing Address','Mailing City','Mailing State','Mailing Zip',
-              'Property Address','Property City','Property State','Property Zip',
-              'Lead Type','Document Type','Date Filed','Document Number','Amount/Debt Owed',
-              'Seller Score','Motivated Seller Flags','Source','Public Records URL'];
-  function splitName(f){
-    if(!f)return['',''];
-    if(f.includes(',')){const[l,fi]=f.split(',',2);return[fi.trim(),l.trim()];}
-    const p=f.trim().split(' ');return[p[0],p.slice(1).join(' ')];
-  }
-  const rows=[cols.join(',')];
-  for(const r of filtered){
-    const[fi,la]=splitName(r.owner);
-    const amt=r.amount?'$'+Number(r.amount).toFixed(2):'';
-    const row=[fi,la,r.mail_address||'',r.mail_city||'',r.mail_state||'',r.mail_zip||'',
-               r.prop_address||'',r.prop_city||'',r.prop_state||'',r.prop_zip||'',
-               r.cat_label||'',r.doc_type||'',r.filed||'',r.doc_num||'',amt,r.score||0,
-               (r.flags||[]).join('; '),'Galveston County Clerk',r.clerk_url||'']
-      .map(v=>'"'+String(v).replace(/"/g,'""')+'"');
-    rows.push(row.join(','));
-  }
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
-  a.download=`galveston_leads_${new Date().toISOString().slice(0,10)}.csv`;
-  a.click();
-}
 
-loadData();
-</script>
-</body>
-</html>
+def main():
+    parser = argparse.ArgumentParser(
+        description="Galveston County 365-Day Backfill Scraper"
+    )
+    parser.add_argument("--days-back",  type=int, default=365)
+    parser.add_argument("--chunk-days", type=int, default=5)
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
+    asyncio.run(run_backfill(args.days_back, args.chunk_days))
+
+
+if __name__ == "__main__":
+    main()
