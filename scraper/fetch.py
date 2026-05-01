@@ -2409,6 +2409,40 @@ def save_ghl_csv(records: list[dict], path_str: str):
 
 # ─── main ──────────────────────────────────────────────────────────────────────
 
+def embed_data_in_dashboard(data: dict, html_path: str):
+    """
+    Bake records data directly into index.html as an inline script.
+    This eliminates the need for a separate fetch() call, making the
+    dashboard work even if records.json can't be fetched separately.
+    """
+    try:
+        path = Path(html_path)
+        if not path.exists():
+            log.warning(f"[Embed] {html_path} not found, skipping")
+            return
+        html = path.read_text(encoding="utf-8")
+        # Replace or insert the inline data script
+        import json as _json
+        data_json = _json.dumps(data, default=str)
+        inline_script = (
+            '<script id="inline-records-data" type="application/json">\n'
+            + data_json + '\n'
+            + '</script>'
+        )
+        # Remove old inline data if present
+        import re as _re
+        html = _re.sub(
+            r'<script id="inline-records-data"[^>]*>.*?</script>',
+            '', html, flags=_re.DOTALL
+        )
+        # Insert before closing </body>
+        html = html.replace('</body>', inline_script + '\n</body>')
+        path.write_text(html, encoding="utf-8")
+        log.info(f"[Embed] baked {data['total']} records into {html_path}")
+    except Exception as exc:
+        log.warning(f"[Embed] failed to embed data into dashboard: {exc}")
+
+
 async def main():
     t0 = datetime.now()
     log.info("="*60)
@@ -2436,6 +2470,7 @@ async def main():
 
     save_json(output, "dashboard/records.json", "data/records.json")
     save_ghl_csv(records, f"data/ghl_export_{datetime.now().strftime('%Y%m%d')}.csv")
+    embed_data_in_dashboard(output, "dashboard/index.html")
 
     elapsed = (datetime.now()-t0).seconds
     log.info(f"\n✅  Done in {elapsed}s — {len(records)} leads | "
