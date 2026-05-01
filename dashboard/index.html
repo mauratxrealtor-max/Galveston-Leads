@@ -177,6 +177,7 @@ const PAGE_SIZE = 50;
 let allRecords = [], filtered = [], currentPage = 1;
 let sortCol = 'score', sortAsc = false;
 const HOT_FLAGS = new Set(['Lis pendens','Pre-foreclosure','Judgment lien','Tax lien']);
+const deferral_flags = new Set(['Tax deferral']);
 
 async function loadData(){
   let data = null;
