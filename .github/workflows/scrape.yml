@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   scrape-and-deploy:
@@ -48,28 +48,32 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
-      - name: Verify records written
+      - name: Verify and show record count
         run: |
-          echo "=== File sizes ==="
-          ls -la dashboard/records.json data/records.json || echo "Files not found!"
-          echo "=== Record count ==="
-          python3 -c "
-          import json, sys
-          try:
-              d = json.load(open('dashboard/records.json'))
-              print(f'dashboard/records.json: total={d[\"total\"]} with_address={d[\"with_address\"]} fetched_at={d[\"fetched_at\"]}')
-          except Exception as e:
-              print(f'ERROR reading dashboard/records.json: {e}')
-              sys.exit(1)
-          "
-          echo "=== First record ==="
+          echo "=== dashboard/records.json ==="
           python3 -c "
           import json
           d = json.load(open('dashboard/records.json'))
+          print(f'total={d[\"total\"]} with_address={d[\"with_address\"]}')
           if d['records']:
               r = d['records'][0]
-              print(f'Top lead: {r.get(\"owner\")} | {r.get(\"cat_label\")} | score={r.get(\"score\")}')
+              print(f'top: {r.get(\"owner\")} | {r.get(\"cat_label\")} | score={r.get(\"score\")}')
           "
+
+      - name: Commit records to repo
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -f dashboard/records.json data/records.json
+          git add data/ghl_export_*.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes (records identical to last run)"
+          else
+            git commit -m "records: $(python3 -c "import json; d=json.load(open('dashboard/records.json')); print(f'{d[\"total\"]} leads {d[\"with_address\"]} w/addr')")" 
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload debug artifacts
         if: always()
@@ -83,24 +87,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Commit updated records
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git status
-          git add dashboard/records.json data/records.json
-          git add data/ghl_export_*.csv 2>/dev/null || true
-          git status
-          if git diff --staged --quiet; then
-            echo "⚠️  No staged changes — records.json may not have changed"
-          else
-            git commit -m "chore: update records $(date -u +'%Y-%m-%d %H:%M UTC')"
-            git push
-            echo "✅ Committed and pushed"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # Deploy to Pages using the LIVE dashboard/ folder from this run
+      # (not a fresh checkout — so it always has the freshly scraped records.json)
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
