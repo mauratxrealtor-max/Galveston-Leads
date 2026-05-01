@@ -112,9 +112,25 @@ def parse_amount(text: str) -> float | None:
         return None
 
 
+# Common AVA doc types that are NOT lead types
+_NON_LEAD_TYPES = frozenset({
+    "DEED","WARRANTYDEED","SPECIALWARRANTYDEED","QUITCLAIMDEED",
+    "AFFIDAVIT","AFFIDAVITOFHEIRSHIP","TRUSTEEDEED","EXECUTORSDEED",
+    "FORECLOSUREDEED","SHERIFFSDEED","CONSTABLESDEED",
+    "MORTGAGE","RELEASE","RELEASEOFLIEN","RELEASEOFMORTGAGE",
+    "ASSIGNMENT","CORRECTIONDEED","SUBORDINATION",
+    "CERTIFIEDCOPY","CERTIFIED","UNCERTIFIEDCOPY",
+    "SUBORDINATIONAGREEMENT","EASEMENT","RIGHTOFWAY",
+    "PLAT","AMENDMENT","POWEROFATTORNEY","REVOCATION",
+})
+
 def map_doc_type(raw: str) -> tuple[str, str] | None:
+    """Return (cat_code, cat_label) for the best-matching lead type, or None."""
     upper = re.sub(r"[\s\-_/]", "", raw.upper())
     if not upper:
+        return None
+    # Explicitly block common non-lead AVA doc types
+    if upper in _NON_LEAD_TYPES:
         return None
     best: tuple[str, str] | None = None
     best_pri, best_len = 999, 0
@@ -130,6 +146,9 @@ def map_doc_type(raw: str) -> tuple[str, str] | None:
             elif vc in upper:
                 pri = 3
             elif upper in vc:
+                # Only match if input is at least 4 chars (avoid "TD"→TAXDEED false pos)
+                if len(upper) < 4:
+                    continue
                 pri = 4
             else:
                 continue
@@ -688,24 +707,50 @@ class ClerkScraper:
 
     async def _search_window(self, page, date_from: str, date_to: str, label: str = ""):
         """
-        Search AVA for a specific date window using the proven _angular_fill approach.
-        Tries multiple fill strategies on reset detection.
+        Search AVA for a specific date window.
+        KEY: navigate to a fresh URL for each window to reset Angular's form state.
+        Verify that the result header contains the expected dates before harvesting.
         """
+        # Normalize dates to MM/DD/YYYY with leading zeros
+        def norm_date(d):
+            try:
+                from datetime import datetime as dt
+                return dt.strptime(d, "%m/%d/%Y").strftime("%m/%d/%Y")
+            except Exception:
+                return d
+
+        date_from = norm_date(date_from)
+        date_to   = norm_date(date_to)
+
         for strategy in range(4):
+            # CRITICAL: fresh page load for each attempt to reset Angular state
+            log.info(f"[Clerk][{label}] fresh load, strategy={strategy}")
+            try:
+                await page.goto(CLERK_AVA_URL, wait_until="domcontentloaded",
+                                timeout=60_000)
+                await self._dismiss(page)
+                await asyncio.sleep(3)
+            except Exception as exc:
+                log.warning(f"[Clerk][{label}] goto failed: {exc}")
+                continue
+
             await self._find_and_click_tab(page, ["Search","Quick Search"])
             await asyncio.sleep(1.5)
-            await self._clear_form(page)
             try:
-                await page.wait_for_selector("#mat-input-0", state="visible", timeout=8000)
+                await page.wait_for_selector("#mat-input-0", state="visible",
+                                             timeout=8000)
             except Exception:
                 pass
             await asyncio.sleep(1)
 
-            await self._fill_date_input(page, "#mat-input-0", date_from, strategy=strategy)
-            await asyncio.sleep(0.5)
-            await self._fill_date_input(page, "#mat-input-1", date_to,   strategy=strategy)
+            await self._fill_date_input(page, "#mat-input-0", date_from,
+                                        strategy=strategy)
+            await asyncio.sleep(0.6)
+            await self._fill_date_input(page, "#mat-input-1", date_to,
+                                        strategy=strategy)
+            await asyncio.sleep(0.4)
 
-            # Verify values
+            # Verify values before submitting
             try:
                 v0 = await page.locator("#mat-input-0").first.input_value()
                 v1 = await page.locator("#mat-input-1").first.input_value()
@@ -720,6 +765,7 @@ class ClerkScraper:
                           name=re.compile(f"^{btn_label}$", re.I))
                     if await btn.count():
                         await btn.first.click()
+                        log.info(f"[Clerk][{label}] submitted")
                         break
                 except Exception:
                     pass
@@ -731,15 +777,39 @@ class ClerkScraper:
                 await asyncio.sleep(3)
 
             url = page.url
-            log.info(f"[Clerk][{label}] s{strategy}: url={url}")
+            if "searchresults" not in url:
+                log.warning(f"[Clerk][{label}] s{strategy}: reset (url={url})")
+                continue
 
-            if "searchresults" in url:
-                await self._log_result_state(page, label)
-                await self._harvest(page, label=label)
-                return
+            # VERIFY: check that result header shows our expected dates
+            result_text = await page.evaluate("()=>document.body.innerText")
+            snippet = result_text.replace("\n"," ")[:400]
+            log.info(f"[Clerk][{label}] result text: {snippet!r}")
 
-            log.warning(f"[Clerk][{label}] strategy {strategy} got reset")
-            await asyncio.sleep(3)
+            # Extract dates from header: "|MM/DD/YYYY|MM/DD/YYYY Results:"
+            header_m = re.search(r"|([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})|([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})",
+                                  result_text)
+            if header_m:
+                hdr_from = header_m.group(1)
+                hdr_to   = header_m.group(2)
+                log.info(f"[Clerk][{label}] header dates: {hdr_from} → {hdr_to}")
+                # Normalize for comparison (strip leading zeros)
+                def strip_zeros(d):
+                    parts = d.split("/")
+                    return "/".join(str(int(p)) for p in parts)
+                expected_from = strip_zeros(date_from)
+                expected_to   = strip_zeros(date_to)
+                got_from      = strip_zeros(hdr_from)
+                got_to        = strip_zeros(hdr_to)
+                if got_from != expected_from or got_to != expected_to:
+                    log.warning(f"[Clerk][{label}] s{strategy}: WRONG DATES "
+                                f"expected {expected_from}→{expected_to} "
+                                f"got {got_from}→{got_to} — retrying")
+                    continue
+
+            log.info(f"[Clerk][{label}] s{strategy}: dates verified ✓")
+            await self._harvest(page, label=label)
+            return
 
         log.warning(f"[Clerk][{label}] all strategies failed for {date_from}→{date_to}")
 
@@ -1839,13 +1909,17 @@ class ClerkScraper:
                 # Primary: JS extraction (works with Angular virtual scroll)
                 js_recs = await self._js_extract_results(page)
                 if js_recs:
-                    recs = [r for r in js_recs if self._accept(r)]
+                    accepted = [r for r in js_recs if self._accept(r)]
+                    # Count lead types before adding to records
+                    lead_recs = [r for r in accepted if map_doc_type(r.get("raw_type",""))]
+                    recs = accepted  # keep all; enrich_records will handle scoring
                     if recs:
                         self.records.extend(recs)
                         for r in recs:
                             self._seen.add(r.get("doc_num", str(r)[:80]))
                         empty_streak = 0
-                        log.info(f"[Clerk][{label}] p{p_num}: +{len(recs)} JS "
+                        log.info(f"[Clerk][{label}] p{p_num}: +{len(recs)} total "
+                                 f"({len(lead_recs)} lead types) "
                                  f"(total={len(self.records)})")
                     else:
                         empty_streak += 1
@@ -2164,8 +2238,16 @@ def enrich_records(raw_records: list[dict], parcel_index: ParcelIndex) -> list[d
             enriched.append(rec)
         except Exception as exc:
             log.warning(f"[Enrich] skipping: {exc}")
-    enriched.sort(key=lambda r: r["score"], reverse=True)
-    return enriched
+    # Filter to lead types only — non-lead docs (deeds, affidavits, etc.)
+    # have no cat/cat_label and should not appear in the output
+    lead_records = [r for r in enriched if r.get("cat")]
+    non_lead_ct  = len(enriched) - len(lead_records)
+    if non_lead_ct:
+        log.info(f"[Enrich] filtered out {non_lead_ct} non-lead-type records "
+                 f"({len(lead_records)} leads remain)")
+
+    lead_records.sort(key=lambda r: r["score"], reverse=True)
+    return lead_records
 
 
 def build_output(records: list[dict], date_from: str, date_to: str) -> dict:
