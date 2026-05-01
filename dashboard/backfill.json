@@ -1,12 +1,12 @@
 {
-  "fetched_at": "2026-05-01T12:32:37.939095Z",
+  "fetched_at": "2026-05-01T13:03:18.487825Z",
   "source": "Galveston County Clerk (AVA) + GCAD Parcel Data",
   "date_range": {
     "from": "2025-05-05",
     "to": "2026-04-30"
   },
   "total": 1826,
-  "with_address": 1735,
+  "with_address": 1736,
   "records": [
     {
       "doc_num": "2025023914",
@@ -2542,6 +2542,32 @@
       "score": 60,
       "flags": [
         "Tax lien",
+        "New this week"
+      ]
+    },
+    {
+      "doc_num": "2026019896",
+      "doc_type": "CONTRACT",
+      "filed": "2026-04-30",
+      "cat": "LNMECH",
+      "cat_label": "Mechanic Lien",
+      "owner": "ANZUALDA MICHAEL",
+      "grantee": "HOME TAX SOLUTIONS LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "5327 AVE P",
+      "prop_city": "Santa Fe",
+      "prop_state": "TX",
+      "prop_zip": "77510",
+      "mail_address": "5327 AVENUE P",
+      "mail_city": "SANTA FE",
+      "mail_state": "TX",
+      "mail_zip": "77510",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019896",
+      "tax_deferral": "",
+      "score": 60,
+      "flags": [
+        "Mechanic lien",
         "New this week"
       ]
     },
@@ -5450,32 +5476,6 @@
       "mail_state": "TX",
       "mail_zip": "",
       "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019903",
-      "tax_deferral": "",
-      "score": 55,
-      "flags": [
-        "Mechanic lien",
-        "New this week"
-      ]
-    },
-    {
-      "doc_num": "2026019896",
-      "doc_type": "CONTRACT",
-      "filed": "2026-04-30",
-      "cat": "LNMECH",
-      "cat_label": "Mechanic Lien",
-      "owner": "UNOFFICIAL",
-      "grantee": "",
-      "amount": null,
-      "legal": "",
-      "prop_address": "",
-      "prop_city": "",
-      "prop_state": "TX",
-      "prop_zip": "",
-      "mail_address": "",
-      "mail_city": "",
-      "mail_state": "TX",
-      "mail_zip": "",
-      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019896",
       "tax_deferral": "",
       "score": 55,
       "flags": [
