@@ -744,10 +744,11 @@ class ClerkScraper:
         log.info(f"[Clerk] URL: {page.url}")
 
         # AVA caps results at 300 records per search.
-        # Strategy: split the 90-day window into 30-day chunks to get full coverage.
-        # Each chunk gets up to 300 records = up to ~900 records total.
+        # Strategy: split into 15-day windows so each window stays well under
+        # the 300-record cap (~10 docs/day × 15 days = ~150 per window).
+        # 90 days / 15 = 6 windows × 300 cap = up to 1800 records total.
         now        = datetime.now()
-        chunk_days = 30
+        chunk_days = 15
         chunks: list[tuple[str,str]] = []
         cursor = now - timedelta(days=LOOK_BACK_DAYS)
         while cursor < now:
