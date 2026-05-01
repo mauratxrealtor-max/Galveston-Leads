@@ -75,6 +75,20 @@ LEAD_TYPES: dict[str, tuple[str, list[str]]] = {
     "NOC":      ("Notice of Commencement", ["NOC", "NOTCOMMENCE", "NOTICE OF COMMENCEMENT"]),
     "RELLP":    ("Release Lis Pendens",    ["RELLP", "RELLISPENDENS", "RELEASELP",
                                             "RELEASE LIS PENDENS"]),
+    # Additional AVA abbreviations seen in Galveston County records
+    "CSLN":     ("Child Support Lien",      ["CSLN", "CHILD SUPPORT LIEN", "CHILDSUPPORT",
+                                             "CHILD SUP LN", "CHILD SUPP"]),
+    "STLN":     ("State Tax Lien",          ["STLN", "STATE TAX LIEN", "STATETAXLIEN",
+                                             "STAT TAX LN", "STAT LN", "STATE LN"]),
+    "WRIT":     ("Writ / Execution",        ["WRIT", "WRIT OF EXECUTION", "WRITOFEXECUTION",
+                                             "WRIT EXEC", "EXEC WRIT"]),
+    "CONSTLN":  ("Constable Lien",          ["CONSTLN", "CONSTAB LN", "CONSTABLE LIEN",
+                                             "CONSTABLELIEN", "CONSTAB LIEN"]),
+    "ABSJDG":   ("Abstract of Judgment",    ["ABSJDG", "ABST OF JDG", "ABST JDG",
+                                             "ABSTRACT OF JUDGMENT", "ABSJUDGMENT",
+                                             "A OF J", "AOJ", "AOFJ"]),
+    "FEDTXLN":  ("Federal Tax Lien",        ["FEDTXLN", "FED TAX LN", "FEDERAL TAX LIEN",
+                                             "FED TAX LIEN", "FEDERALTAXLIEN"]),
 }
 
 AVA_SEARCH_CODES = list(LEAD_TYPES.keys())
@@ -111,6 +125,10 @@ def parse_amount(text: str) -> float | None:
     except ValueError:
         return None
 
+
+# Add TXDEF (Tax Deferral synthetic leads) as a recognized category
+# so enrich_records doesn't filter them out
+LEAD_TYPES["TXDEF"] = ("Tax Deferral", ["TAXDEFERRAL", "TAX DEFERRAL", "TXDEF"])
 
 # Common AVA doc types that are NOT lead types
 _NON_LEAD_TYPES = frozenset({
@@ -400,7 +418,10 @@ class ParcelIndex:
 
         site_num   = self._get(row, "SITUS_NUM",    "SITE_NUM",   "STR_NUM")
         site_str   = self._get(row, "SITUS_STREET", "STR_NAME",   "STREET_NAME", "SITUS_STR")
-        # Build situs/property address from components (APPRAISAL_INFO format)
+        # Build situs/property address from APPRAISAL_INFO components
+        # SITUS_PREFX [1039:1049] = street number or directional prefix (e.g. "1234" or "N")
+        # SITUS_STREET [1049:1099] = street name
+        # SITUS_SUFFIX [1099:1109] = suffix (ST, AVE, DR, etc.)
         situs_prefx  = self._get(row, "SITUS_PREFX")
         situs_street = self._get(row, "SITUS_STREET")
         situs_suffix = self._get(row, "SITUS_SUFFIX")
@@ -409,10 +430,19 @@ class ParcelIndex:
                                       "SITEADDR", "ADDRESS", "PROP_ADDRESS",
                                       "SITE_ADDRESS", "SITUS_ADDRESS")
         if not site_full:
-            # Assemble from parts
-            parts = [p for p in [site_num, situs_prefx, situs_street, situs_suffix] if p]
-            if not parts:
-                parts = [p for p in [situs_num2, situs_prefx, situs_street] if p]
+            # SITUS_PREFX often holds the street number in Galveston CAD exports
+            # Try to detect if it looks numeric (street number) vs directional
+            import re as _re
+            prefx_is_num = bool(situs_prefx and _re.match(r"^\d+", situs_prefx.strip()))
+            parts = []
+            if prefx_is_num:
+                # SITUS_PREFX = street number: "1234 SEAWALL BLVD"
+                parts = [p for p in [situs_prefx, situs_street, situs_suffix] if p]
+            else:
+                # SITUS_PREFX = directional: "N SEAWALL BLVD"
+                parts = [p for p in [site_num, situs_prefx, situs_street, situs_suffix] if p]
+            if not parts and situs_num2:
+                parts = [p for p in [situs_num2, situs_street, situs_suffix] if p]
             site_full = " ".join(parts).strip()
 
         site_city  = self._get(row, "SITUS_CITY",  "SITE_CITY", "SITECITY",
@@ -665,6 +695,19 @@ class ParcelIndex:
                 pass
         log.info(f"[CAD] tax deferral: {len(lines)} records, {count} matched to parcel index")
 
+    @staticmethod
+    def _fuzzy_normalize(name: str) -> str:
+        """Normalize for fuzzy matching: strip business suffixes, sort words."""
+        import re as _re
+        n = name.upper()
+        n = _re.sub(
+            r"\b(LLC|INC|CORP|LTD|LLP|TRUST|TRUSTEE|ESTATE|"
+            r"SR|JR|SALE|SPECIALIST|ATTY|PROPERTIES|HOLDINGS|"
+            r"INVESTMENTS|GROUP|ENTERPRISES|SERVICES|MANAGEMENT|REALTY)\b",
+            " ", n
+        )
+        n = _re.sub(r"[^A-Z0-9\s]", " ", n)
+        return " ".join(sorted(w for w in n.split() if len(w) > 2))
     def lookup(self, owner: str) -> dict:
         if not self._loaded:
             self.load()
@@ -688,11 +731,29 @@ class ParcelIndex:
                             result["tax_deferral"] = self._deferral_owners[dk]
                             break
                 return result
-        # Even if not in address index, check deferral set
+        # Deferral-only match (no address but has deferral flag)
         if hasattr(self, "_deferral_owners"):
             for k in keys:
                 if k in self._deferral_owners:
                     return {"tax_deferral": self._deferral_owners[k]}
+
+        # Last resort: fuzzy match — normalize and try sorted-word lookup
+        fuzzy_key = self._fuzzy_normalize(owner)
+        if fuzzy_key and len(fuzzy_key) >= 4:
+            # Build fuzzy index on first access
+            if not hasattr(self, "_fuzzy_index"):
+                self._fuzzy_index: dict[str, dict] = {}
+                for name_key, entry in self._by_name.items():
+                    fk = self._fuzzy_normalize(name_key)
+                    if fk and len(fk) >= 4:
+                        self._fuzzy_index.setdefault(fk, entry)
+            if fuzzy_key in self._fuzzy_index:
+                return dict(self._fuzzy_index[fuzzy_key])
+            # Partial match: any key that starts with the fuzzy key
+            for fk, entry in self._fuzzy_index.items():
+                if fuzzy_key in fk or fk in fuzzy_key:
+                    return dict(entry)
+
         return {}
 
 
@@ -743,12 +804,12 @@ class ClerkScraper:
         log.info(f"[Clerk] page title: {await page.title()}")
         log.info(f"[Clerk] URL: {page.url}")
 
-        # AVA caps results at 300 records per search.
-        # Strategy: split into 15-day windows so each window stays well under
-        # the 300-record cap (~10 docs/day × 15 days = ~150 per window).
-        # 90 days / 15 = 6 windows × 300 cap = up to 1800 records total.
+        # AVA caps at 300 results per search. Galveston files ~100 docs/day
+        # across all types, so 5-day windows (~500 total docs) stay well
+        # under cap for lead types (~60 leads per window).
+        # 90 days / 5 = 18 windows × up to 300 = up to 5,400 raw records.
         now        = datetime.now()
-        chunk_days = 15
+        chunk_days = 5
         chunks: list[tuple[str,str]] = []
         cursor = now - timedelta(days=LOOK_BACK_DAYS)
         while cursor < now:
@@ -2283,6 +2344,58 @@ class ClerkScraper:
 
 # ─── enrichment ────────────────────────────────────────────────────────────────
 
+def make_deferral_leads(parcel_index: ParcelIndex) -> list[dict]:
+    """
+    Create synthetic lead records for owners with tax deferrals.
+    These are elderly/disabled property owners who deferred taxes — 
+    high-probability motivated sellers even without a recent court filing.
+    """
+    leads = []
+    if not hasattr(parcel_index, "_deferral_owners"):
+        return leads
+
+    for owner_key, deferral_flag in parcel_index._deferral_owners.items():
+        try:
+            parcel = parcel_index.lookup(owner_key)
+            if not parcel:
+                continue
+            # Only include if we have an address
+            if not (parcel.get("prop_address") or parcel.get("mail_address")):
+                continue
+
+            # Reconstruct original case from key
+            owner_display = owner_key.title()
+
+            rec: dict[str, Any] = {
+                "doc_num":      "",
+                "doc_type":     "TAX DEFERRAL",
+                "filed":        "",
+                "cat":          "TXDEF",
+                "cat_label":    "Tax Deferral",
+                "owner":        owner_display,
+                "grantee":      "",
+                "amount":       None,
+                "legal":        "",
+                "prop_address": parcel.get("prop_address", ""),
+                "prop_city":    parcel.get("prop_city", ""),
+                "prop_state":   parcel.get("prop_state", "TX"),
+                "prop_zip":     parcel.get("prop_zip", ""),
+                "mail_address": parcel.get("mail_address", ""),
+                "mail_city":    parcel.get("mail_city", ""),
+                "mail_state":   parcel.get("mail_state", "TX"),
+                "mail_zip":     parcel.get("mail_zip", ""),
+                "clerk_url":    "",
+                "tax_deferral": deferral_flag,
+            }
+            rec["score"], rec["flags"] = score_record(rec)
+            leads.append(rec)
+        except Exception:
+            pass
+
+    log.info(f"[Leads] {len(leads)} tax-deferral standalone leads generated")
+    return leads
+
+
 def enrich_records(raw_records: list[dict], parcel_index: ParcelIndex) -> list[dict]:
     enriched = []
     for raw in raw_records:
@@ -2467,6 +2580,20 @@ async def main():
 
     log.info("[Step 3/3] Enriching and scoring…")
     records = enrich_records(raw_records, parcel_index)
+
+    # Add tax-deferral standalone leads (OV65/DP owners with known addresses)
+    deferral_leads = make_deferral_leads(parcel_index)
+    if deferral_leads:
+        # Merge and re-sort, dedup by owner+address
+        existing_keys = {(r["owner"].lower(), r["prop_address"].lower())
+                         for r in records}
+        new_def = [r for r in deferral_leads
+                   if (r["owner"].lower(), r["prop_address"].lower())
+                   not in existing_keys]
+        records = sorted(records + new_def,
+                         key=lambda r: r["score"], reverse=True)
+        log.info(f"[Main] added {len(new_def)} deferral leads → {len(records)} total")
+
     output  = build_output(records, date_from, date_to)
 
     save_json(output, "dashboard/records.json", "data/records.json")
