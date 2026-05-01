@@ -1,12 +1,12 @@
 {
-  "fetched_at": "2026-05-01T13:03:18.487825Z",
+  "fetched_at": "2026-05-01T13:34:34.901957Z",
   "source": "Galveston County Clerk (AVA) + GCAD Parcel Data",
   "date_range": {
     "from": "2025-05-05",
     "to": "2026-04-30"
   },
-  "total": 1826,
-  "with_address": 1736,
+  "total": 1825,
+  "with_address": 1737,
   "records": [
     {
       "doc_num": "2025023914",
@@ -2388,6 +2388,33 @@
       ]
     },
     {
+      "doc_num": "2026019903",
+      "doc_type": "CONTRACT",
+      "filed": "2026-04-30",
+      "cat": "LNMECH",
+      "cat_label": "Mechanic Lien",
+      "owner": "PAT BLACK PROPERTIES LLC",
+      "grantee": "FNA VII LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "1330 RESORT RD",
+      "prop_city": "Crystal Beach",
+      "prop_state": "TX",
+      "prop_zip": "77650",
+      "mail_address": "3914 PERU CIRCLE",
+      "mail_city": "PASADENA",
+      "mail_state": "TX",
+      "mail_zip": "77504",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019903",
+      "tax_deferral": "",
+      "score": 70,
+      "flags": [
+        "Mechanic lien",
+        "LLC / corp owner",
+        "New this week"
+      ]
+    },
+    {
       "doc_num": "2026000491",
       "doc_type": "FORECLOSURE FILED",
       "filed": "2026-04-30",
@@ -2542,6 +2569,32 @@
       "score": 60,
       "flags": [
         "Tax lien",
+        "New this week"
+      ]
+    },
+    {
+      "doc_num": "2026019904",
+      "doc_type": "CONTRACT",
+      "filed": "2026-04-30",
+      "cat": "LNMECH",
+      "cat_label": "Mechanic Lien",
+      "owner": "LOPEZ CHRISTINE MENDOZA",
+      "grantee": "HOME TAX SOLUTIONS LLC",
+      "amount": null,
+      "legal": "",
+      "prop_address": "601 N CLEAR CREEK DR N",
+      "prop_city": "Friendswood",
+      "prop_state": "TX",
+      "prop_zip": "77546",
+      "mail_address": "601 N CLEAR CREEK DR",
+      "mail_city": "FRIENDSWOOD",
+      "mail_state": "TX",
+      "mail_zip": "77546",
+      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019904",
+      "tax_deferral": "",
+      "score": 60,
+      "flags": [
+        "Mechanic lien",
         "New this week"
       ]
     },
@@ -2854,32 +2907,6 @@
       "score": 60,
       "flags": [
         "Pre-foreclosure",
-        "New this week"
-      ]
-    },
-    {
-      "doc_num": "2026019638",
-      "doc_type": "HMSTD AFFD",
-      "filed": "2026-04-30",
-      "cat": "TAXDEED",
-      "cat_label": "Tax Deed",
-      "owner": "HANSCHE ASHLEY ERIN",
-      "grantee": "",
-      "amount": null,
-      "legal": "",
-      "prop_address": "1505 AVENUE K",
-      "prop_city": "Galveston",
-      "prop_state": "TX",
-      "prop_zip": "77550",
-      "mail_address": "",
-      "mail_city": "",
-      "mail_state": "TX",
-      "mail_zip": "",
-      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019638",
-      "tax_deferral": "",
-      "score": 60,
-      "flags": [
-        "Tax lien",
         "New this week"
       ]
     },
@@ -5429,58 +5456,6 @@
       "flags": [
         "Judgment lien",
         "LLC / corp owner"
-      ]
-    },
-    {
-      "doc_num": "2026019904",
-      "doc_type": "CONTRACT",
-      "filed": "2026-04-30",
-      "cat": "LNMECH",
-      "cat_label": "Mechanic Lien",
-      "owner": "UNOFFICIAL",
-      "grantee": "",
-      "amount": null,
-      "legal": "",
-      "prop_address": "",
-      "prop_city": "",
-      "prop_state": "TX",
-      "prop_zip": "",
-      "mail_address": "",
-      "mail_city": "",
-      "mail_state": "TX",
-      "mail_zip": "",
-      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019904",
-      "tax_deferral": "",
-      "score": 55,
-      "flags": [
-        "Mechanic lien",
-        "New this week"
-      ]
-    },
-    {
-      "doc_num": "2026019903",
-      "doc_type": "CONTRACT",
-      "filed": "2026-04-30",
-      "cat": "LNMECH",
-      "cat_label": "Mechanic Lien",
-      "owner": "UNOFFICIAL",
-      "grantee": "",
-      "amount": null,
-      "legal": "",
-      "prop_address": "",
-      "prop_city": "",
-      "prop_state": "TX",
-      "prop_zip": "",
-      "mail_address": "",
-      "mail_city": "",
-      "mail_state": "TX",
-      "mail_zip": "",
-      "clerk_url": "https://ava.fidlar.com/TXGalveston/AvaWeb/#/searchresults/2026019903",
-      "tax_deferral": "",
-      "score": 55,
-      "flags": [
-        "Mechanic lien",
-        "New this week"
       ]
     },
     {
